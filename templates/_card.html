@@ -1,0 +1,8 @@
+<div class="card">
+  {% if v.thumbnail %}<a href="{{ v.url }}" target="_blank"><img src="{{ v.thumbnail }}" loading="lazy" alt=""></a>{% endif %}
+  <div class="body">
+    <h4><span class="rank">{{ rank }}.</span> <a href="{{ v.url }}" target="_blank">{{ v.title }}</a></h4>
+    <div class="stats">{{ v.channel }} · {{ "{:,}".format(v.views) }} views · {{ v.date }} · {{ v.duration }}</div>
+    <div class="summary">{{ v.summary | mdlite }}</div>
+  </div>
+</div>

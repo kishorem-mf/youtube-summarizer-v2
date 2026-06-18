@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Summary Watch</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e7e9ee; --mut:#9aa3b2; --accent:#ff4d4f; --good:#3ecf8e; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+    header h1 { font-size:18px; margin:0; }
+    header .sub { color:var(--mut); font-size:13px; }
+    .wrap { max-width:1100px; margin:0 auto; padding:24px; }
+    form.controls { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
+    .groups { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
+    .group h3 { margin:0 0 8px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); }
+    label.term { display:flex; gap:8px; align-items:center; padding:3px 0; font-size:14px; cursor:pointer; }
+    .row { display:flex; flex-wrap:wrap; gap:18px; align-items:center; margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+    .row label { font-size:13px; color:var(--mut); display:flex; align-items:center; gap:6px; }
+    input[type=number] { width:60px; }
+    input[type=text] { background:#0f1115; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:7px 10px; min-width:260px; }
+    select { background:#0f1115; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:6px 8px; }
+    form.adhoc { margin-top:16px; }
+    .adhoc-title { margin:0 0 12px; font-size:14px; color:var(--fg); }
+    details.transcript-box { margin-top:14px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 16px; }
+    details.transcript-box summary { cursor:pointer; color:var(--mut); font-size:13px; }
+    .transcript-text { margin-top:12px; font-size:13px; line-height:1.7; white-space:pre-wrap; max-height:420px; overflow:auto; color:var(--fg); }
+    button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 20px; font-weight:600; cursor:pointer; }
+    button.sec { background:#2a2f3a; }
+    .hint { color:var(--mut); font-size:12px; margin-top:10px; }
+    .meta { color:var(--mut); font-size:13px; margin:18px 0 6px; }
+    .term-block { margin-top:28px; }
+    .term-head { display:flex; align-items:baseline; gap:12px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+    .term-head h2 { font-size:17px; margin:0; }
+    .tabs { display:flex; gap:6px; margin:12px 0; }
+    .tabbtn { background:#2a2f3a; color:var(--fg); border:1px solid var(--line); border-radius:999px; padding:5px 14px; font-size:13px; cursor:pointer; }
+    .tabbtn.active { background:var(--accent); border-color:var(--accent); }
+    .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:16px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
+    .card img { width:100%; aspect-ratio:16/9; object-fit:cover; background:#000; }
+    .card .body { padding:12px 14px; }
+    .card h4 { margin:0 0 6px; font-size:14px; line-height:1.35; }
+    .card h4 a { color:var(--fg); text-decoration:none; }
+    .card h4 a:hover { color:var(--accent); }
+    .stats { color:var(--mut); font-size:12px; margin-bottom:8px; }
+    .summary { font-size:13px; white-space:pre-wrap; }
+    .rank { display:inline-block; min-width:20px; color:var(--accent); font-weight:700; }
+    .err { color:var(--accent); font-size:13px; }
+    .empty { color:var(--mut); font-style:italic; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>📺 YouTube Summary Watch</h1>
+  <span class="sub">yt-dlp search · Azure gpt-4o-mini summaries · top + trending</span>
+</header>
+
+<div class="wrap">
+  <form class="controls" method="post" action="/run">
+    <div class="groups">
+      {% for gname, terms in groups.items() %}
+      <div class="group">
+        <h3>{{ gname }}</h3>
+        {% for t in terms %}
+        <label class="term">
+          <input type="checkbox" name="terms" value="{{ t }}"
+            {% if selected and t in selected %}checked{% endif %}>
+          {{ t }}
+        </label>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="row">
+      <label>Uploaded
+        <select name="date_filter">
+          {% for val, lbl in date_windows %}
+          <option value="{{ val }}" {% if val == date_filter %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Sort by
+        <select name="sort_order">
+          {% for val, lbl in sort_options %}
+          <option value="{{ val }}" {% if val == sort_order %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Detail
+        <select name="detail">
+          {% for val, lbl in detail_options %}
+          <option value="{{ val }}" {% if val == detail %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Videos / term
+        <input type="number" name="max_results" min="1" max="15" value="{{ default_max }}">
+      </label>
+      <label><input type="checkbox" name="deep" {% if deep %}checked{% endif %}>
+        Deep mode (fetch full transcripts via youtube-transcript-api — slower)
+      </label>
+      <label>Custom terms (comma-sep)
+        <input type="text" name="custom" placeholder="e.g. apache flink, vector database">
+      </label>
+      <button type="submit">Run summary</button>
+    </div>
+    <div class="hint">No boxes ticked = run <strong>all</strong> terms. In deep mode, each video fetches its full transcript via youtube-transcript-api. <strong>Detail</strong> controls how many key points each summary has (High works best with Deep mode / the ad-hoc tool below).</div>
+  </form>
+
+  <form class="controls adhoc" method="post" action="/transcript">
+    <h3 class="adhoc-title">🎯 Ad-hoc research — single video transcript</h3>
+    <div class="row" style="border-top:none; padding-top:0; margin-top:0;">
+      <label style="flex:1; min-width:320px;">YouTube URL
+        <input type="text" name="video_url" style="width:100%;"
+          placeholder="https://www.youtube.com/watch?v=...  (or youtu.be/...)"
+          value="{{ transcript_result.url if transcript_result else '' }}">
+      </label>
+      <label>Detail
+        <select name="detail">
+          {% for val, lbl in detail_options %}
+          <option value="{{ val }}" {% if val == detail %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">Get transcript</button>
+    </div>
+    <div class="hint">Fetches the full transcript using youtube-transcript-api.</div>
+  </form>
+
+  {% if transcript_result is not none %}
+    {% if transcript_result.error %}
+      <div class="err">⚠ {{ transcript_result.error }}{% if transcript_result.url %} ({{ transcript_result.url }}){% endif %}</div>
+    {% else %}
+    <div class="term-block">
+      <div class="term-head"><h2>Transcript &amp; summary</h2></div>
+      <div class="meta">
+        <a href="{{ transcript_result.url }}" target="_blank">{{ transcript_result.url }}</a> ·
+        {{ "{:,}".format(transcript_result.wordCount) }} words ·
+        {{ transcript_result.durationMinutes }} min ·
+        lang: {{ transcript_result.language or "n/a" }} ·
+        detail: <strong>{{ transcript_result.detail }}</strong>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <div class="body">
+          <h4>Key points</h4>
+          <div class="summary">{{ transcript_result.summary | mdlite }}</div>
+        </div>
+      </div>
+      <details class="transcript-box">
+        <summary>Show full transcript ({{ "{:,}".format(transcript_result.wordCount) }} words)</summary>
+        <div class="transcript-text">{{ transcript_result.transcript }}</div>
+      </details>
+    </div>
+    {% endif %}
+  {% endif %}
+
+  {% if results is not none %}
+    <div class="meta">
+      Digest for <strong>{{ today }}</strong> · {{ total_videos }} unique videos ·
+      Uploaded: <strong>{{ window_label }}</strong> · sorted by {{ sort_order }} ·
+      saved to <code>outputs/digest_{{ today }}.md</code>
+      {% if deep %}· <span style="color:var(--good)">deep transcripts on</span>{% endif %}
+    </div>
+
+    {% if errors %}
+      {% for term, e in errors.items() %}
+        <div class="err">⚠ {{ term }}: {{ e }}</div>
+      {% endfor %}
+    {% endif %}
+
+    {% for term, data in results.items() %}
+    <div class="term-block">
+      <div class="term-head"><h2>{{ term }}</h2></div>
+      {% if not data.top %}
+        <p class="empty">No video results for this term.</p>
+      {% else %}
+        {% set tid = loop.index %}
+        <div class="tabs">
+          <button type="button" class="tabbtn active" onclick="showTab('{{ tid }}','top',this)">🔎 Top searched</button>
+          <button type="button" class="tabbtn" onclick="showTab('{{ tid }}','trend',this)">🔥 Trending (by views)</button>
+        </div>
+
+        <div id="tab-{{ tid }}-top" class="cards">
+          {% for v in data.top %}{% set rank = loop.index %}{% include "_card.html" %}{% endfor %}
+        </div>
+        <div id="tab-{{ tid }}-trend" class="cards" style="display:none">
+          {% for v in data.trending %}{% set rank = loop.index %}{% include "_card.html" %}{% endfor %}
+        </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% endif %}
+</div>
+
+<script>
+function showTab(tid, which, btn) {
+  document.getElementById('tab-'+tid+'-top').style.display   = (which==='top')   ? 'grid' : 'none';
+  document.getElementById('tab-'+tid+'-trend').style.display = (which==='trend') ? 'grid' : 'none';
+  btn.parentNode.querySelectorAll('.tabbtn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+</script>
+</body>
+</html>
