@@ -48,12 +48,19 @@
     .rank { display:inline-block; min-width:20px; color:var(--accent); font-weight:700; }
     .err { color:var(--accent); font-size:13px; }
     .empty { color:var(--mut); font-style:italic; }
+    .card-actions { margin: 8px 0 4px; }
+    .btn-summary { background: #2a2f3a; color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; }
+    .btn-summary:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-summary:disabled { opacity: 0.5; cursor: default; }
+    .summary-label { font-size: 12px; color: var(--mut); margin: 8px 0 4px; }
+    .badge-apify { background: #2a2f3a; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+    .mut { color: var(--mut); font-size: 13px; }
   </style>
 </head>
 <body>
 <header>
   <h1>📺 YouTube Summary Watch</h1>
-  <span class="sub">yt-dlp search · Azure gpt-4o-mini summaries · top + trending</span>
+  <span class="sub">YouTube API search · on-demand transcripts · Azure gpt-4o-mini summaries</span>
 </header>
 
 <div class="wrap">
@@ -98,15 +105,12 @@
       <label>Videos / term
         <input type="number" name="max_results" min="1" max="15" value="{{ default_max }}">
       </label>
-      <label><input type="checkbox" name="deep" {% if deep %}checked{% endif %}>
-        Deep mode (fetch full transcripts via youtube-transcript-api — slower)
-      </label>
       <label>Custom terms (comma-sep)
         <input type="text" name="custom" placeholder="e.g. apache flink, vector database">
       </label>
       <button type="submit">Run summary</button>
     </div>
-    <div class="hint">No boxes ticked = run <strong>all</strong> terms. In deep mode, each video fetches its full transcript via youtube-transcript-api. <strong>Detail</strong> controls how many key points each summary has (High works best with Deep mode / the ad-hoc tool below).</div>
+    <div class="hint">No boxes ticked = run <strong>all</strong> terms. Click <strong>Get Summary</strong> on any card to fetch its transcript and generate a summary on demand — saving API credits for videos you actually care about. <strong>Detail</strong> controls how many key points the summary has.</div>
   </form>
 
   <form class="controls adhoc" method="post" action="/transcript">
@@ -161,7 +165,6 @@
       Digest for <strong>{{ today }}</strong> · {{ total_videos }} unique videos ·
       Uploaded: <strong>{{ window_label }}</strong> · sorted by {{ sort_order }} ·
       saved to <code>outputs/digest_{{ today }}.md</code>
-      {% if deep %}· <span style="color:var(--good)">deep transcripts on</span>{% endif %}
     </div>
 
     {% if errors %}
@@ -200,6 +203,54 @@ function showTab(tid, which, btn) {
   document.getElementById('tab-'+tid+'-trend').style.display = (which==='trend') ? 'grid' : 'none';
   btn.parentNode.querySelectorAll('.tabbtn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function mdlite(s) {
+  return escHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+}
+
+async function getSummary(btn) {
+  const d = btn.dataset;
+  const sa = document.getElementById('sa-' + d.id);
+  btn.disabled = true;
+  btn.textContent = 'Fetching…';
+  sa.style.display = 'block';
+  sa.innerHTML = '<span class="mut">Loading transcript and generating summary…</span>';
+
+  try {
+    const resp = await fetch('/video_summary', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        video_id: d.id, url: d.url, title: d.title,
+        channel: d.channel, views: d.views, date: d.date,
+        duration: d.duration, detail: d.detail
+      })
+    });
+    const r = await resp.json();
+    if (r.error) {
+      sa.innerHTML = '<div class="err">⚠ ' + escHtml(r.error) + '</div>';
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+    } else {
+      const src = r.source === 'apify'
+        ? ' <span class="badge-apify">via Apify</span>'
+        : ' <span class="badge-apify">youtube-transcript-api</span>';
+      sa.innerHTML =
+        '<div class="summary-label">Summary' + src + ' · ' + (r.wordCount||0) + ' words · lang: ' + escHtml(r.language||'n/a') + '</div>' +
+        '<div class="summary">' + mdlite(r.summary||'') + '</div>';
+      btn.textContent = 'Refresh';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    sa.innerHTML = '<div class="err">⚠ Request failed: ' + escHtml(String(e)) + '</div>';
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
 }
 </script>
 </body>

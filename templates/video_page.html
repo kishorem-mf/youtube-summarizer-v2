@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ video.title or "Video Summary" }} — YT Summarizer</title>
+  <style>
+    :root {
+      --bg: #0f0f0f;
+      --surface: #1a1a1a;
+      --surface2: #252525;
+      --border: #333;
+      --text: #e8e8e8;
+      --muted: #999;
+      --accent: #ff4444;
+      --accent2: #3b82f6;
+      --green: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; min-height: 100vh; }
+
+    .header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .header a.back { color: var(--accent); text-decoration: none; font-size: 14px; }
+    .header a.back:hover { text-decoration: underline; }
+    .header .logo { font-weight: 700; font-size: 16px; color: var(--text); }
+
+    .container { max-width: 900px; margin: 0 auto; padding: 28px 20px; }
+
+    .player-wrap {
+      position: relative;
+      padding-bottom: 56.25%;
+      height: 0;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 20px;
+    }
+    .player-wrap iframe {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%;
+      border: none;
+    }
+
+    .video-title {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin-bottom: 8px;
+    }
+    .video-title a { color: var(--text); text-decoration: none; }
+    .video-title a:hover { color: var(--accent2); }
+
+    .meta {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+    }
+    .meta span { white-space: nowrap; }
+
+    /* Detail selector */
+    .section-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .detail-group {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .detail-group input[type="radio"] { display: none; }
+    .detail-group label {
+      padding: 7px 20px;
+      border: 1.5px solid var(--border);
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--muted);
+      transition: border-color .15s, color .15s, background .15s;
+      user-select: none;
+    }
+    .detail-group input[type="radio"]:checked + label {
+      border-color: var(--accent2);
+      color: var(--accent2);
+      background: rgba(59,130,246,.12);
+    }
+    .detail-group label:hover {
+      border-color: #555;
+      color: var(--text);
+    }
+
+    .btn-get {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--accent2);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 24px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+      margin-bottom: 28px;
+    }
+    .btn-get:hover { background: #2563eb; }
+    .btn-get:disabled { opacity: .55; cursor: default; }
+
+    .spinner {
+      display: none;
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Result panels */
+    .result-area { display: none; }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      cursor: pointer;
+      user-select: none;
+      background: var(--surface2);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .panel-head .tag {
+      font-size: 11px;
+      font-weight: 500;
+      background: rgba(59,130,246,.18);
+      color: var(--accent2);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .panel-head .chevron {
+      font-size: 11px;
+      color: var(--muted);
+      transition: transform .2s;
+    }
+    .panel-head.open .chevron { transform: rotate(180deg); }
+    .panel-body {
+      padding: 14px 16px;
+      font-size: 14px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      display: none;
+    }
+    .panel-body.visible { display: block; }
+
+    .summary-text {
+      font-size: 14px;
+      line-height: 1.75;
+      white-space: pre-wrap;
+      padding: 16px;
+    }
+
+    .error-box {
+      background: rgba(239,68,68,.12);
+      border: 1px solid rgba(239,68,68,.35);
+      color: #fca5a5;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 13px;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 24px 0;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <a class="back" href="javascript:window.close()">✕ Close</a>
+  <span class="logo">YT Summarizer</span>
+</div>
+
+<div class="container">
+  <!-- YouTube embed -->
+  <div class="player-wrap">
+    <iframe
+      src="https://www.youtube.com/embed/{{ video.id }}"
+      title="{{ video.title | e }}"
+      allowfullscreen
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
+    </iframe>
+  </div>
+
+  <!-- Title + meta -->
+  <div class="video-title">
+    <a href="{{ video.url }}" target="_blank" rel="noopener">{{ video.title }}</a>
+  </div>
+  <div class="meta">
+    {% if video.channel %}<span>{{ video.channel }}</span>{% endif %}
+    {% if video.views and video.views != "0" %}<span>{{ "{:,}".format(video.views | int) }} views</span>{% endif %}
+    {% if video.date %}<span>{{ video.date }}</span>{% endif %}
+    {% if video.duration %}<span>{{ video.duration }}</span>{% endif %}
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Detail selector -->
+  <div class="section-label">Summary Detail</div>
+  <div class="detail-group" id="detail-group">
+    {% for val, label in detail_options %}
+    <input type="radio" name="detail" id="det-{{ val }}" value="{{ val }}"
+      {% if val == default_detail %}checked{% endif %}>
+    <label for="det-{{ val }}">{{ label }}</label>
+    {% endfor %}
+  </div>
+
+  <!-- Action button -->
+  <button class="btn-get" id="btn-get" onclick="getSummary()">
+    <span class="spinner" id="spinner"></span>
+    <span id="btn-label">Get Summary</span>
+  </button>
+
+  <!-- Result -->
+  <div class="result-area" id="result-area">
+    <!-- Summary panel -->
+    <div class="panel" id="panel-summary">
+      <div class="panel-head open" id="head-summary" onclick="togglePanel('summary')">
+        <span>Summary</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="tag" id="tag-detail"></span>
+          <span class="chevron">▼</span>
+        </div>
+      </div>
+      <div class="panel-body visible" id="body-summary">
+        <div class="summary-text" id="summary-text"></div>
+      </div>
+    </div>
+
+    <!-- Transcript panel (collapsible) -->
+    <div class="panel" id="panel-transcript" style="display:none">
+      <div class="panel-head" id="head-transcript" onclick="togglePanel('transcript')">
+        <span>Transcript</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="tag" id="tag-words"></span>
+          <span class="chevron">▼</span>
+        </div>
+      </div>
+      <div class="panel-body" id="body-transcript" style="color:#aaa;font-size:13px;"></div>
+    </div>
+
+    <!-- Error box -->
+    <div class="error-box" id="error-box" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+  const VIDEO = {
+    id:       {{ video.id | tojson }},
+    url:      {{ video.url | tojson }},
+    title:    {{ video.title | tojson }},
+    channel:  {{ video.channel | tojson }},
+    views:    {{ video.views | tojson }},
+    date:     {{ video.date | tojson }},
+    duration: {{ video.duration | tojson }},
+  };
+
+  function getDetail() {
+    const checked = document.querySelector('input[name="detail"]:checked');
+    return checked ? checked.value : "{{ default_detail }}";
+  }
+
+  function togglePanel(name) {
+    const head = document.getElementById("head-" + name);
+    const body = document.getElementById("body-" + name);
+    head.classList.toggle("open");
+    body.classList.toggle("visible");
+  }
+
+  async function getSummary() {
+    const btn   = document.getElementById("btn-get");
+    const lbl   = document.getElementById("btn-label");
+    const spin  = document.getElementById("spinner");
+    const area  = document.getElementById("result-area");
+    const errBox = document.getElementById("error-box");
+
+    btn.disabled = true;
+    lbl.textContent = "Fetching…";
+    spin.style.display = "block";
+    area.style.display  = "none";
+    errBox.style.display = "none";
+
+    const detail = getDetail();
+
+    try {
+      const resp = await fetch("/video_summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          video_id: VIDEO.id,
+          url:      VIDEO.url,
+          title:    VIDEO.title,
+          channel:  VIDEO.channel,
+          views:    VIDEO.views,
+          date:     VIDEO.date,
+          duration: VIDEO.duration,
+          detail:   detail,
+        }),
+      });
+      const data = await resp.json();
+
+      area.style.display = "block";
+      document.getElementById("tag-detail").textContent = detail.charAt(0).toUpperCase() + detail.slice(1);
+
+      if (data.error) {
+        errBox.style.display = "block";
+        errBox.textContent = data.error;
+        document.getElementById("panel-summary").style.display = "none";
+      } else {
+        document.getElementById("panel-summary").style.display = "";
+        document.getElementById("summary-text").textContent = data.summary || "";
+      }
+
+      if (data.transcript) {
+        document.getElementById("panel-transcript").style.display = "";
+        document.getElementById("body-transcript").textContent = data.transcript;
+        const wordCount = data.transcript.trim().split(/\s+/).length;
+        document.getElementById("tag-words").textContent = wordCount.toLocaleString() + " words";
+      } else {
+        document.getElementById("panel-transcript").style.display = "none";
+      }
+
+    } catch (err) {
+      area.style.display = "block";
+      errBox.style.display = "block";
+      errBox.textContent = "Request failed: " + err.message;
+      document.getElementById("panel-summary").style.display = "none";
+    } finally {
+      btn.disabled = false;
+      lbl.textContent = "Get Summary";
+      spin.style.display = "none";
+    }
+  }
+</script>
+</body>
+</html>

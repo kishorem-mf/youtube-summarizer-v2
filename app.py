@@ -5,9 +5,17 @@ Note: port 8051 is used by default so this can run alongside the original
 app on port 8050. Override with the PORT env var if needed.
 """
 
+import io
 import os
 import re
+import sys
 import datetime as dt
+
+# Force UTF-8 stdout/stderr so Windows cp1252 console doesn't choke on emoji in video titles
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from dotenv import load_dotenv
 
@@ -91,7 +99,6 @@ def run():
         max_results = max(1, min(15, int(request.form.get("max_results", DEFAULT_MAX))))
     except ValueError:
         max_results = DEFAULT_MAX
-    deep = request.form.get("deep") == "on"
 
     valid_dates = {v for v, _ in DATE_WINDOWS}
     date_filter = request.form.get("date_filter", DEFAULT_DATE_FILTER)
@@ -110,13 +117,13 @@ def run():
     term_pairs = [(label, build_query(label)) for label in selected]
 
     results, videos_by_id, errors = summarizer.run_terms(
-        term_pairs, max_results=max_results, deep=deep,
-        date_filter=date_filter or None, sort_order=sort_order, detail=detail,
+        term_pairs, max_results=max_results,
+        date_filter=date_filter or None, sort_order=sort_order,
     )
 
     window_label = dict(DATE_WINDOWS).get(date_filter, "Any time")
     today = dt.date.today().isoformat()
-    _save_digest(today, selected, results, deep, window_label)
+    _save_digest(today, selected, results, window_label)
 
     return render_template(
         "index.html",
@@ -132,10 +139,53 @@ def run():
         results=results,
         errors=errors,
         selected=selected,
-        deep=deep,
         today=today,
         total_videos=len(videos_by_id),
         transcript_result=None,
+    )
+
+
+@app.route("/video_summary", methods=["POST"])
+def video_summary():
+    """On-demand: fetch transcript + summary for one video. Returns JSON."""
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    video = {
+        "id":       data.get("video_id", ""),
+        "url":      data.get("url", ""),
+        "title":    data.get("title", ""),
+        "channel":  data.get("channel", ""),
+        "views":    int(data.get("views", 0)),
+        "date":     data.get("date", ""),
+        "duration": data.get("duration", ""),
+    }
+    valid_details = {v for v, _ in DETAIL_OPTIONS}
+    detail = data.get("detail", DEFAULT_DETAIL)
+    if detail not in valid_details:
+        detail = DEFAULT_DETAIL
+
+    result = summarizer.fetch_and_summarize(video, detail=detail)
+    return jsonify(result)
+
+
+@app.route("/video/<video_id>", methods=["GET"])
+def video_page(video_id):
+    """Standalone video page: shows metadata, YouTube embed, and detail selector for on-demand summarization."""
+    from flask import jsonify
+    video = {
+        "id":       video_id,
+        "title":    request.args.get("title", ""),
+        "channel":  request.args.get("channel", ""),
+        "views":    request.args.get("views", "0"),
+        "date":     request.args.get("date", ""),
+        "duration": request.args.get("duration", ""),
+        "url":      request.args.get("url", f"https://www.youtube.com/watch?v={video_id}"),
+    }
+    return render_template(
+        "video_page.html",
+        video=video,
+        detail_options=DETAIL_OPTIONS,
+        default_detail=DEFAULT_DETAIL,
     )
 
 
@@ -172,13 +222,10 @@ def transcript():
     )
 
 
-def _save_digest(today, terms, results, deep, window_label="Any time"):
+def _save_digest(today, terms, results, window_label="Any time"):
     """Write a markdown digest to outputs/ for the record."""
     lines = [f"# YouTube Summary Digest — {today}", ""]
-    lines.append(
-        f"**Terms:** {len(terms)} · **Uploaded:** {window_label} · "
-        f"**Deep transcripts:** {'yes' if deep else 'no'}"
-    )
+    lines.append(f"**Terms:** {len(terms)} · **Uploaded:** {window_label}")
     lines.append("")
     for term, data in results.items():
         lines.append(f"## {term}")
@@ -191,10 +238,10 @@ def _save_digest(today, terms, results, deep, window_label="Any time"):
                 f"{v['channel']} · {v['views']:,} views · {v['date']} · {v['duration']}"
             )
             lines.append("")
-            lines.append(v.get("summary", ""))
+            lines.append("_(summary available on demand — click Get Summary in the UI)_")
             lines.append("")
     path = os.path.join(OUTPUTS, f"digest_{today}.md")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
 

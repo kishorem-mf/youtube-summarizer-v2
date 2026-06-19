@@ -1,8 +1,14 @@
-<div class="card">
+<div class="card" id="card-{{ v.id }}">
   {% if v.thumbnail %}<a href="{{ v.url }}" target="_blank"><img src="{{ v.thumbnail }}" loading="lazy" alt=""></a>{% endif %}
   <div class="body">
     <h4><span class="rank">{{ rank }}.</span> <a href="{{ v.url }}" target="_blank">{{ v.title }}</a></h4>
     <div class="stats">{{ v.channel }} · {{ "{:,}".format(v.views) }} views · {{ v.date }} · {{ v.duration }}</div>
-    <div class="summary">{{ v.summary | mdlite }}</div>
+    <div class="card-actions">
+      <a class="btn-summary"
+        href="/video/{{ v.id }}?title={{ v.title | urlencode }}&channel={{ v.channel | urlencode }}&views={{ v.views }}&date={{ v.date }}&duration={{ v.duration | urlencode }}&url={{ v.url | urlencode }}"
+        target="_blank">
+        View Transcript &amp; Summary
+      </a>
+    </div>
   </div>
 </div>

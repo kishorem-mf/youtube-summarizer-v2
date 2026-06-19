@@ -1,22 +1,37 @@
-"""Core logic: search YouTube via yt-dlp and summarize with Azure OpenAI."""
+﻿"""Core logic: search YouTube via yt-dlp and summarize with Anthropic via Azure AI Foundry."""
 
 import datetime
 import json
 import os
 import re
 import subprocess
+import sys
+import urllib.parse
+import urllib.request
 import concurrent.futures as cf
 
-from openai import AzureOpenAI
+_YTDLP = [sys.executable, "-m", "yt_dlp", "--no-check-certificates", "--no-check-formats"]
 
-_azure = AzureOpenAI(
-    api_key=os.environ["AZURE_OPENAI_API_KEY"],
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-    api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+# Corporate SSL inspection proxy bypass
+import ssl as _ssl
+_ssl._create_default_https_context = _ssl._create_unverified_context
+
+import anthropic as _anthropic_sdk
+import httpx as _httpx
+
+_anthropic = _anthropic_sdk.Anthropic(
+    api_key=os.environ["ANTHROPIC_FOUNDRY_API_KEY"],
+    base_url=os.environ.get("ANTHROPIC_FOUNDRY_ENDPOINT", "https://nandamagatala-8810-resource.services.ai.azure.com/anthropic/v1"),
+    http_client=_httpx.Client(verify=False),
 )
-_AZURE_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
+_ANTHROPIC_DEPLOYMENT = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-sonnet-4-6")
+
+_APIFY_TOKEN = os.environ.get("APIFY_API_KEY", "")
+_APIFY_BASE = "https://api.apify.com/v2/acts"
+_TRANSCRIPT_ACTOR = "foudhil~actor-youtube-transcript"
 
 _WATCH_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})")
+DEFAULT_DETAIL = "medium"
 
 
 def _extract_vid(url):
@@ -48,12 +63,30 @@ def _fmt_duration(secs):
     return f"{h}h {m}m" if h else f"{m}m"
 
 
-def _fmt_date(upload_date):
-    """Convert YYYYMMDD to YYYY-MM-DD."""
+def _fmt_date(upload_date, timestamp=None):
+    """Convert YYYYMMDD to YYYY-MM-DD, or fall back to Unix timestamp."""
     d = upload_date or ""
     if len(d) == 8:
         return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+    if timestamp:
+        try:
+            return datetime.datetime.utcfromtimestamp(int(timestamp)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
     return d
+
+
+def _yyyymmdd(upload_date, timestamp=None):
+    """Return YYYYMMDD string for date-filter comparisons."""
+    d = upload_date or ""
+    if len(d) == 8:
+        return d
+    if timestamp:
+        try:
+            return datetime.datetime.utcfromtimestamp(int(timestamp)).strftime("%Y%m%d")
+        except Exception:
+            pass
+    return ""
 
 
 def _best_thumbnail(data):
@@ -69,19 +102,148 @@ def _best_thumbnail(data):
 # Search
 # --------------------------------------------------------------------------- #
 
-def search_videos(keyword, max_results=6, date_filter=None, sort_order="relevance"):
-    """Search YouTube using yt-dlp ytsearch and return normalized video dicts."""
+_YT_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
+_YT_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+_YT_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+
+_DATE_FILTER_ISO = {
+    "hour":  lambda: (datetime.datetime.utcnow() - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "today": lambda: (datetime.datetime.utcnow() - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "week":  lambda: (datetime.datetime.utcnow() - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "month": lambda: (datetime.datetime.utcnow() - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "year":  lambda: (datetime.datetime.utcnow() - datetime.timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+
+_SORT_MAP = {
+    "relevance": "relevance",
+    "date":      "date",
+    "views":     "viewCount",
+    "rating":    "rating",
+}
+
+
+def _yt_api_get(url, params):
+    """GET a YouTube API URL with params, return parsed JSON."""
+    import urllib.parse
+    full = url + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(full, headers={"User-Agent": "Mozilla/5.0"})
+    resp = urllib.request.urlopen(req, timeout=15)
+    return json.loads(resp.read())
+
+
+def _search_yt_api(keyword, max_results=6, date_filter=None, sort_order="relevance"):
+    """Search via YouTube Data API v3 — returns full metadata including dates."""
+    params = {
+        "part": "snippet",
+        "q": keyword,
+        "type": "video",
+        "maxResults": min(max_results, 50),
+        "order": _SORT_MAP.get(sort_order, "relevance"),
+        "videoDuration": "medium",   # excludes Shorts (<4 min) and very long (>20 min) — use 'any' for all
+        "key": _YT_API_KEY,
+    }
+    # Add date filter if specified
+    published_after = _DATE_FILTER_ISO.get(date_filter)
+    if published_after:
+        params["publishedAfter"] = published_after()
+
+    # Override videoDuration to 'any' so we also get long videos
+    params["videoDuration"] = "any"
+
+    data = _yt_api_get(_YT_SEARCH_URL, params)
+    items = data.get("items", [])
+
+    if not items:
+        return []
+
+    # Fetch view counts + duration via videos.list (search results don't include them)
+    video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
+    stats = {}
+    if video_ids:
+        vdata = _yt_api_get(_YT_VIDEOS_URL, {
+            "part": "statistics,contentDetails",
+            "id": ",".join(video_ids),
+            "key": _YT_API_KEY,
+        })
+        for v in vdata.get("items", []):
+            vid = v["id"]
+            dur_iso = v.get("contentDetails", {}).get("duration", "")
+            stats[vid] = {
+                "views": int(v.get("statistics", {}).get("viewCount", 0)),
+                "likes": int(v.get("statistics", {}).get("likeCount", 0)),
+                "duration": _parse_iso_duration(dur_iso),
+                "duration_s": _iso_duration_secs(dur_iso),
+            }
+
+    videos = []
+    for it in items:
+        vid = it.get("id", {}).get("videoId")
+        if not vid:
+            continue
+        snip = it.get("snippet", {})
+        s = stats.get(vid, {})
+
+        # Skip Shorts (< 61 seconds)
+        if 0 < s.get("duration_s", 999) < 61:
+            continue
+
+        pub = (snip.get("publishedAt") or "")[:10]   # YYYY-MM-DD
+        thumb = (
+            snip.get("thumbnails", {}).get("high", {}).get("url")
+            or snip.get("thumbnails", {}).get("medium", {}).get("url")
+            or snip.get("thumbnails", {}).get("default", {}).get("url")
+            or ""
+        )
+        videos.append({
+            "id": vid,
+            "title": snip.get("title") or "(untitled)",
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "channel": snip.get("channelTitle") or "",
+            "views": s.get("views", 0),
+            "likes": s.get("likes", 0),
+            "date": pub,
+            "duration": s.get("duration", ""),
+            "subscribers": 0,
+            "thumbnail": thumb,
+            "description": (snip.get("description") or "")[:3000],
+        })
+
+    return videos[:max_results]
+
+
+def _parse_iso_duration(iso):
+    """Convert ISO 8601 duration (PT1H2M3S) to human-readable string."""
+    if not iso:
+        return ""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso)
+    if not m:
+        return ""
+    h, mn, s = int(m.group(1) or 0), int(m.group(2) or 0), int(m.group(3) or 0)
+    return f"{h}h {mn}m" if h else f"{mn}m"
+
+
+def _iso_duration_secs(iso):
+    """Convert ISO 8601 duration to total seconds."""
+    if not iso:
+        return 0
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso)
+    if not m:
+        return 0
+    h, mn, s = int(m.group(1) or 0), int(m.group(2) or 0), int(m.group(3) or 0)
+    return h * 3600 + mn * 60 + s
+
+
+def _search_ytdlp(keyword, max_results=6, date_filter=None, sort_order="relevance"):
+    """Fallback search via yt-dlp flat-playlist (no dates or descriptions)."""
     fetch_n = max_results * 3 if date_filter else max_results + 2
-    cmd = [
-        "yt-dlp", "--dump-json", "--no-warnings", "--quiet",
+    cmd = _YTDLP + [
+        "--dump-json", "--flat-playlist", "--no-warnings", "--quiet",
         f"ytsearch{fetch_n}:{keyword}",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         raise RuntimeError("yt-dlp search timed out after 120s")
-    except FileNotFoundError:
-        raise RuntimeError("yt-dlp not installed — pip install yt-dlp")
 
     cutoff = _cutoff_date(date_filter)
     videos = []
@@ -93,22 +255,17 @@ def search_videos(keyword, max_results=6, date_filter=None, sort_order="relevanc
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-
         vid = data.get("id")
         if not vid:
             continue
-
-        # Skip Shorts (very short videos)
         dur_s = data.get("duration") or 0
         if 0 < dur_s < 61:
             continue
-
-        # Date filter
+        ts = data.get("timestamp") or data.get("release_timestamp")
         if cutoff:
-            upload_date = data.get("upload_date") or ""
-            if upload_date and upload_date < cutoff:
+            vid_date = _yyyymmdd(data.get("upload_date"), ts)
+            if vid_date and vid_date < cutoff:
                 continue
-
         videos.append({
             "id": vid,
             "title": data.get("title") or "(untitled)",
@@ -116,22 +273,26 @@ def search_videos(keyword, max_results=6, date_filter=None, sort_order="relevanc
             "channel": data.get("channel") or data.get("uploader") or "",
             "views": data.get("view_count") or 0,
             "likes": data.get("like_count") or 0,
-            "date": _fmt_date(data.get("upload_date") or ""),
+            "date": _fmt_date(data.get("upload_date"), ts),
             "duration": _fmt_duration(dur_s),
             "subscribers": data.get("channel_follower_count") or 0,
             "thumbnail": _best_thumbnail(data),
             "description": (data.get("description") or "")[:3000],
         })
-
         if len(videos) >= max_results:
             break
-
     if sort_order == "views":
         videos.sort(key=lambda x: x["views"], reverse=True)
     elif sort_order == "date":
         videos.sort(key=lambda x: x["date"], reverse=True)
-
     return videos
+
+
+def search_videos(keyword, max_results=6, date_filter=None, sort_order="relevance"):
+    """Dispatcher: YouTube Data API v3 if key present, else yt-dlp fallback."""
+    if _YT_API_KEY:
+        return _search_yt_api(keyword, max_results, date_filter, sort_order)
+    return _search_ytdlp(keyword, max_results, date_filter, sort_order)
 
 
 # --------------------------------------------------------------------------- #
@@ -146,10 +307,18 @@ def _fetch_transcript_text(video_id):
         return "", ""
 
     try:
+        # Pass a no-verify httpx client to handle corporate SSL inspection proxies.
+        # youtube-transcript-api 1.x uses httpx internally which ignores the urllib SSL patch.
         try:
-            tlist = YouTubeTranscriptApi().list(video_id)
-        except (AttributeError, TypeError):
-            tlist = YouTubeTranscriptApi.list_transcripts(video_id)
+            import httpx
+            client = httpx.Client(verify=False)
+            tlist = YouTubeTranscriptApi(http_client=client).list(video_id)
+        except (TypeError, AttributeError):
+            # Older API or httpx not available — fall back to default client
+            try:
+                tlist = YouTubeTranscriptApi().list(video_id)
+            except (AttributeError, TypeError):
+                tlist = YouTubeTranscriptApi.list_transcripts(video_id)
     except Exception:
         return "", ""
 
@@ -183,6 +352,75 @@ def fetch_transcript(url):
     return text
 
 
+def _fetch_transcript_apify(url):
+    """Fetch transcript via Apify transcript actor. Returns text or ''."""
+    if not _APIFY_TOKEN:
+        return ""
+    try:
+        import requests as _req
+        resp = _req.post(
+            f"{_APIFY_BASE}/{_TRANSCRIPT_ACTOR}/run-sync-get-dataset-items",
+            params={"token": _APIFY_TOKEN, "timeout": 120},
+            json={
+                "videoUrl": url,
+                "includeTimestamps": False,
+                "languages": ["en", "en-US", "en-GB"],
+                "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
+            },
+            timeout=180,
+            verify=False,
+        )
+        resp.raise_for_status()
+        items = resp.json()
+        for it in items:
+            for key in ("transcript", "text", "captions"):
+                val = it.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
+                if isinstance(val, list):
+                    parts = [s.get("text", "") if isinstance(s, dict) else str(s) for s in val]
+                    joined = " ".join(p for p in parts if p)
+                    if joined.strip():
+                        return joined
+    except Exception:
+        return ""
+    return ""
+
+
+def fetch_and_summarize(video, detail=DEFAULT_DETAIL):
+    """On-demand: fetch transcript for one video and summarize it.
+
+    Tries youtube-transcript-api first (free); falls back to Apify if key present.
+    Returns dict: {transcript, summary, source, wordCount, language, error}
+    """
+    vid = video.get("id") or _extract_vid(video.get("url", ""))
+    url = video.get("url", f"https://www.youtube.com/watch?v={vid}")
+
+    text, lang = _fetch_transcript_text(vid)
+    source = "youtube-transcript-api"
+
+    if not text and _APIFY_TOKEN:
+        text = _fetch_transcript_apify(url)
+        source = "apify"
+        lang = ""
+
+    if not text:
+        msg = "No transcript available."
+        if not _APIFY_TOKEN:
+            msg += " Add APIFY_API_KEY to .env to enable Apify fallback."
+        return {"transcript": "", "summary": "", "source": "", "wordCount": 0, "language": "", "error": msg}
+
+    summary = summarize_video(video, text, detail=detail)
+    return {
+        "transcript": text,
+        "summary": summary,
+        "source": source,
+        "wordCount": len(text.split()),
+        "language": lang,
+        "error": "",
+    }
+
+
 def fetch_transcript_full(url):
     """Fetch transcript + metadata for ad-hoc single-video tool.
 
@@ -212,8 +450,8 @@ def fetch_transcript_full(url):
     # Estimate duration from yt-dlp (best effort, non-blocking)
     try:
         proc = subprocess.run(
-            ["yt-dlp", "--dump-json", "--quiet", "--no-warnings",
-             "--skip-download", f"https://www.youtube.com/watch?v={vid}"],
+            _YTDLP + ["--dump-json", "--quiet", "--no-warnings",
+                      "--skip-download", f"https://www.youtube.com/watch?v={vid}"],
             capture_output=True, text=True, timeout=30,
         )
         meta = json.loads(proc.stdout.strip())
@@ -277,16 +515,15 @@ def summarize_video(video, source_text, detail=DEFAULT_DETAIL):
         f"Material:\n{source_text}"
     )
     try:
-        resp = _azure.chat.completions.create(
-            model=_AZURE_DEPLOYMENT,
+        resp = _anthropic.messages.create(
+            model=_ANTHROPIC_DEPLOYMENT,
+            system=SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ],
             max_tokens=max_tokens,
-            temperature=0.3,
         )
-        return resp.choices[0].message.content.strip()
+        return resp.content[0].text.strip()
     except Exception as e:
         return f"_Summary failed: {e}_"
 
@@ -295,17 +532,14 @@ def summarize_video(video, source_text, detail=DEFAULT_DETAIL):
 # Orchestration
 # --------------------------------------------------------------------------- #
 
-def run_terms(terms, max_results=6, deep=False, date_filter=None,
-              sort_order="relevance", detail=DEFAULT_DETAIL, max_workers=4):
-    """Search each term, summarize unique videos, return structured results."""
+def run_terms(terms, max_results=6, date_filter=None, sort_order="relevance", max_workers=4):
+    """Search each term, return video lists. Summaries are fetched on demand."""
     results = {}
     errors = {}
 
     def _search(label, query):
-        return label, search_videos(
-            query, max_results=max_results,
-            date_filter=date_filter, sort_order=sort_order,
-        )
+        return label, search_videos(query, max_results=max_results,
+                                    date_filter=date_filter, sort_order=sort_order)
 
     with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [(label, ex.submit(_search, label, query)) for label, query in terms]
@@ -321,28 +555,6 @@ def run_terms(terms, max_results=6, deep=False, date_filter=None,
     for vids in results.values():
         for v in vids:
             videos_by_id.setdefault(v["id"], v)
-
-    if deep:
-        def _tx(v):
-            return v["id"], fetch_transcript(v["url"])
-
-        with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for vid, fut in [(v["id"], ex.submit(_tx, v)) for v in videos_by_id.values()]:
-                try:
-                    videos_by_id[vid]["transcript"] = fut.result()[1]
-                except Exception:
-                    videos_by_id[vid]["transcript"] = ""
-
-    def _sum(v):
-        src = v.get("transcript") or v.get("description")
-        return v["id"], summarize_video(v, src, detail=detail)
-
-    with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for vid, fut in [(v["id"], ex.submit(_sum, v)) for v in videos_by_id.values()]:
-            try:
-                videos_by_id[vid]["summary"] = fut.result()[1]
-            except Exception as e:
-                videos_by_id[vid]["summary"] = f"_Summary failed: {e}_"
 
     out = {}
     for term, vids in results.items():
