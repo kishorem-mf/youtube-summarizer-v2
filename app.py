@@ -70,6 +70,7 @@ def mdlite(text):
 def index():
     return render_template(
         "index.html",
+        active_tab="search",
         groups=search_terms.get_groups(),
         default_max=DEFAULT_MAX,
         date_windows=DATE_WINDOWS,
@@ -129,6 +130,7 @@ def run():
 
     return render_template(
         "index.html",
+        active_tab="search",
         groups=search_terms.get_groups(),
         default_max=max_results,
         date_windows=DATE_WINDOWS,
@@ -221,6 +223,7 @@ def transcript():
 
     return render_template(
         "index.html",
+        active_tab="search",
         groups=search_terms.get_groups(),
         default_max=DEFAULT_MAX,
         date_windows=DATE_WINDOWS,
@@ -243,7 +246,8 @@ def dynamo_explorer():
                limit="20", query_label="", message=None, message_type=None)
 
     if request.method == "GET":
-        return render_template("dynamo_explorer.html", **ctx)
+        ctx["active_tab"] = "dynamo"
+    return render_template("dynamo_explorer.html", **ctx)
 
     qt       = request.form.get("query_type", "get_item")
     video_id = request.form.get("video_id", "").strip()
@@ -284,6 +288,7 @@ def dynamo_explorer():
     except Exception as e:
         ctx.update(rows=[], message=f"DynamoDB error: {e}", message_type="err")
 
+    ctx["active_tab"] = "dynamo"
     return render_template("dynamo_explorer.html", **ctx)
 
 
@@ -356,6 +361,7 @@ def terms_manager():
 
     return render_template(
         "terms_manager.html",
+        active_tab="terms",
         groups=search_terms.get_groups(),
         context=search_terms.get_context(),
         message=message,

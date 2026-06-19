@@ -8,11 +8,15 @@
     :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e7e9ee; --mut:#9aa3b2; --accent:#ff4d4f; --good:#3ecf8e; --warn:#f5a623; }
     * { box-sizing:border-box; }
     body { margin:0; font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
-    header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px; }
-    header h1 { font-size:18px; margin:0; }
-    header .sub { color:var(--mut); font-size:13px; }
-    header a { color:var(--mut); font-size:13px; text-decoration:none; margin-left:auto; }
-    header a:hover { color:var(--fg); }
+    /* shared app nav */
+    .app-shell-header { background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:0; padding:0 24px; height:52px; }
+    .brand { display:flex; align-items:center; gap:8px; margin-right:32px; }
+    .brand-icon { font-size:20px; }
+    .brand-name { font-size:15px; font-weight:600; color:var(--fg); white-space:nowrap; }
+    .app-tabs { display:flex; gap:0; height:100%; }
+    .app-tab { display:flex; align-items:center; padding:0 18px; font-size:14px; color:var(--mut); text-decoration:none; border-bottom:2px solid transparent; transition:color .15s,border-color .15s; white-space:nowrap; }
+    .app-tab:hover { color:var(--fg); }
+    .app-tab.active { color:var(--fg); border-bottom-color:var(--accent); font-weight:600; }
     .wrap { max-width:1300px; margin:0 auto; padding:24px; }
 
     /* Query form */
@@ -68,11 +72,7 @@
   </style>
 </head>
 <body>
-<header>
-  <h1>DynamoDB Explorer</h1>
-  <span class="sub">yt-summarizer-cache</span>
-  <a href="/">← Back to app</a>
-</header>
+{% include '_nav.html' %}
 
 <div class="wrap">
 
