@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Search Terms Manager</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e7e9ee; --mut:#9aa3b2; --accent:#ff4d4f; --good:#3ecf8e; --warn:#f5a623; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px; }
+    header h1 { font-size:18px; margin:0; }
+    header .sub { color:var(--mut); font-size:13px; }
+    nav { margin-left:auto; display:flex; gap:16px; }
+    nav a { color:var(--mut); font-size:13px; text-decoration:none; }
+    nav a:hover { color:var(--fg); }
+    .wrap { max-width:900px; margin:0 auto; padding:24px; }
+
+    .flash { padding:10px 16px; border-radius:8px; margin-bottom:20px; font-size:14px; }
+    .flash.ok  { background:#1a3a2a; border:1px solid var(--good); color:var(--good); }
+    .flash.err { background:#3a1a1a; border:1px solid var(--accent); color:var(--accent); }
+
+    /* Add term / group panels */
+    .add-panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:28px; }
+    .add-panel h2 { margin:0 0 14px; font-size:14px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; }
+    .field { display:flex; flex-direction:column; gap:5px; }
+    .field label { font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+    input[type=text], select {
+      background:#0f1115; border:1px solid var(--line); color:var(--fg);
+      border-radius:8px; padding:8px 12px; font-size:14px;
+    }
+    input[type=text] { min-width:220px; }
+    input[type=text]:focus, select:focus { outline:none; border-color:var(--accent); }
+    select { min-width:200px; cursor:pointer; }
+    .btn { border:0; border-radius:8px; padding:9px 18px; font-weight:600; cursor:pointer; font-size:14px; }
+    .btn-primary { background:var(--accent); color:#fff; }
+    .btn-primary:hover { opacity:.85; }
+    .btn-ghost { background:#2a2f3a; color:var(--fg); }
+    .btn-ghost:hover { background:#353b48; }
+
+    /* Groups */
+    .groups { display:grid; gap:20px; }
+    .group-card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; }
+    .group-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+    .group-name { font-size:15px; font-weight:600; flex:1; }
+    .context-form { display:flex; gap:8px; align-items:center; }
+    .context-form input { min-width:160px; font-size:13px; padding:6px 10px; }
+    .context-label { font-size:12px; color:var(--mut); white-space:nowrap; }
+    .btn-save-ctx { background:#2a2f3a; color:var(--good); border:1px solid var(--good); border-radius:6px; padding:5px 12px; font-size:12px; cursor:pointer; }
+    .btn-save-ctx:hover { background:var(--good); color:#000; }
+    .btn-del-group { background:transparent; color:var(--mut); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-size:12px; cursor:pointer; }
+    .btn-del-group:hover { border-color:var(--accent); color:var(--accent); }
+    .terms-list { display:flex; flex-wrap:wrap; gap:8px; margin-top:4px; }
+    .term-chip { display:inline-flex; align-items:center; gap:6px; background:#1e222c; border:1px solid var(--line); border-radius:20px; padding:5px 12px; font-size:13px; }
+    .term-chip button { background:none; border:none; color:var(--mut); cursor:pointer; font-size:14px; padding:0; line-height:1; }
+    .term-chip button:hover { color:var(--accent); }
+    .empty-group { color:var(--mut); font-size:13px; font-style:italic; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Search Terms</h1>
+  <span class="sub">Manage groups and terms used for YouTube search</span>
+  <nav>
+    <a href="/dynamo">DynamoDB Explorer</a>
+    <a href="/">← Back to app</a>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  {% if message %}
+  <div class="flash {{ 'ok' if message_type == 'ok' else 'err' }}">{{ message }}</div>
+  {% endif %}
+
+  <!-- Add new term -->
+  <div class="add-panel">
+    <h2>Add Search Term</h2>
+    <form method="POST">
+      <input type="hidden" name="action" value="add_term">
+      <div class="row">
+        <div class="field">
+          <label>Group</label>
+          <select name="group">
+            {% for g in groups %}
+            <option value="{{ g }}">{{ g }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Search Term</label>
+          <input type="text" name="term" placeholder="e.g. vector databases" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Add Term</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Add new group -->
+  <div class="add-panel">
+    <h2>Add New Group</h2>
+    <form method="POST">
+      <input type="hidden" name="action" value="add_group">
+      <div class="row">
+        <div class="field">
+          <label>Group Name</label>
+          <input type="text" name="new_group" placeholder="e.g. AI Tools" required>
+        </div>
+        <div class="field">
+          <label>Search Context <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional suffix)</span></label>
+          <input type="text" name="new_context" placeholder="e.g. machine learning">
+        </div>
+        <button type="submit" class="btn btn-ghost">Create Group</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Groups & terms -->
+  <div class="groups">
+    {% for group, terms in groups.items() %}
+    <div class="group-card">
+      <div class="group-header">
+        <span class="group-name">{{ group }}</span>
+
+        <!-- Edit context -->
+        <form method="POST" class="context-form">
+          <input type="hidden" name="action" value="update_context">
+          <input type="hidden" name="group" value="{{ group }}">
+          <span class="context-label">Context suffix:</span>
+          <input type="text" name="context_value" value="{{ context.get(group, '') }}" placeholder="none">
+          <button type="submit" class="btn-save-ctx">Save</button>
+        </form>
+
+        <!-- Delete group -->
+        <form method="POST" onsubmit="return confirm('Delete group {{ group }} and all its terms?')">
+          <input type="hidden" name="action" value="delete_group">
+          <input type="hidden" name="group" value="{{ group }}">
+          <button type="submit" class="btn-del-group">Delete group</button>
+        </form>
+      </div>
+
+      <div class="terms-list">
+        {% if terms %}
+          {% for term in terms %}
+          <span class="term-chip">
+            {{ term }}
+            <form method="POST" style="margin:0">
+              <input type="hidden" name="action" value="delete_term">
+              <input type="hidden" name="group" value="{{ group }}">
+              <input type="hidden" name="term" value="{{ term }}">
+              <button type="submit" title="Remove">✕</button>
+            </form>
+          </span>
+          {% endfor %}
+        {% else %}
+          <span class="empty-group">No terms yet — add one above.</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+</div>
+</body>
+</html>

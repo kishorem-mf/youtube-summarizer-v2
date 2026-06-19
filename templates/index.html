@@ -11,6 +11,9 @@
     header { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
     header h1 { font-size:18px; margin:0; }
     header .sub { color:var(--mut); font-size:13px; }
+    header nav { margin-left:auto; display:flex; gap:16px; }
+    header nav a { color:var(--mut); font-size:13px; text-decoration:none; }
+    header nav a:hover { color:var(--fg); }
     .wrap { max-width:1100px; margin:0 auto; padding:24px; }
     form.controls { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
     .groups { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
@@ -61,6 +64,10 @@
 <header>
   <h1>📺 YouTube Summary Watch</h1>
   <span class="sub">YouTube API search · on-demand transcripts · Azure gpt-4o-mini summaries</span>
+  <nav>
+    <a href="/terms">Search Terms</a>
+    <a href="/dynamo">DB Explorer</a>
+  </nav>
 </header>
 
 <div class="wrap">

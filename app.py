@@ -24,7 +24,7 @@ load_dotenv()  # must run before importing summarizer (reads env at import)
 
 from flask import Flask, render_template, request, redirect, url_for  # noqa: E402
 
-from search_terms import SEARCH_GROUPS, all_terms, build_query  # noqa: E402
+import search_terms  # noqa: E402
 import summarizer  # noqa: E402
 import storage     # noqa: E402
 
@@ -70,7 +70,7 @@ def mdlite(text):
 def index():
     return render_template(
         "index.html",
-        groups=SEARCH_GROUPS,
+        groups=search_terms.get_groups(),
         default_max=DEFAULT_MAX,
         date_windows=DATE_WINDOWS,
         sort_options=SORT_OPTIONS,
@@ -95,7 +95,7 @@ def run():
     if custom:
         selected = selected + [t.strip() for t in custom.split(",") if t.strip()]
     if not selected:
-        selected = all_terms()
+        selected = search_terms.all_terms()
 
     try:
         max_results = max(1, min(15, int(request.form.get("max_results", DEFAULT_MAX))))
@@ -116,7 +116,7 @@ def run():
         detail = DEFAULT_DETAIL
 
     # Map each selected display label to its context-augmented query.
-    term_pairs = [(label, build_query(label)) for label in selected]
+    term_pairs = [(label, search_terms.build_query(label)) for label in selected]
 
     results, videos_by_id, errors = summarizer.run_terms(
         term_pairs, max_results=max_results,
@@ -129,7 +129,7 @@ def run():
 
     return render_template(
         "index.html",
-        groups=SEARCH_GROUPS,
+        groups=search_terms.get_groups(),
         default_max=max_results,
         date_windows=DATE_WINDOWS,
         sort_options=SORT_OPTIONS,
@@ -221,7 +221,7 @@ def transcript():
 
     return render_template(
         "index.html",
-        groups=SEARCH_GROUPS,
+        groups=search_terms.get_groups(),
         default_max=DEFAULT_MAX,
         date_windows=DATE_WINDOWS,
         sort_options=SORT_OPTIONS,
@@ -285,6 +285,82 @@ def dynamo_explorer():
         ctx.update(rows=[], message=f"DynamoDB error: {e}", message_type="err")
 
     return render_template("dynamo_explorer.html", **ctx)
+
+
+@app.route("/terms", methods=["GET", "POST"])
+def terms_manager():
+    message = None
+    message_type = None
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        groups  = search_terms.get_groups()
+        context = search_terms.get_context()
+
+        if action == "add_term":
+            group = request.form.get("group", "").strip()
+            term  = request.form.get("term", "").strip()
+            if group and term:
+                if group not in groups:
+                    groups[group] = []
+                    context.setdefault(group, "")
+                if term not in groups[group]:
+                    groups[group].append(term)
+                    search_terms.save_terms(groups, context)
+                    message, message_type = f'Added "{term}" to {group}.', "ok"
+                else:
+                    message, message_type = f'"{term}" already exists in {group}.', "err"
+            else:
+                message, message_type = "Group and term are required.", "err"
+
+        elif action == "add_group":
+            group   = request.form.get("new_group", "").strip()
+            ctx_val = request.form.get("new_context", "").strip()
+            if group:
+                if group not in groups:
+                    groups[group] = []
+                    context[group] = ctx_val
+                    search_terms.save_terms(groups, context)
+                    message, message_type = f'Group "{group}" created.', "ok"
+                else:
+                    message, message_type = f'Group "{group}" already exists.', "err"
+            else:
+                message, message_type = "Group name is required.", "err"
+
+        elif action == "delete_term":
+            group = request.form.get("group", "").strip()
+            term  = request.form.get("term", "").strip()
+            if group in groups and term in groups[group]:
+                groups[group].remove(term)
+                if not groups[group]:
+                    del groups[group]
+                    context.pop(group, None)
+                search_terms.save_terms(groups, context)
+                message, message_type = f'Deleted "{term}".', "ok"
+
+        elif action == "update_context":
+            group   = request.form.get("group", "").strip()
+            ctx_val = request.form.get("context_value", "").strip()
+            if group in groups:
+                context[group] = ctx_val
+                search_terms.save_terms(groups, context)
+                message, message_type = f'Context for "{group}" updated.', "ok"
+
+        elif action == "delete_group":
+            group = request.form.get("group", "").strip()
+            if group in groups:
+                del groups[group]
+                context.pop(group, None)
+                search_terms.save_terms(groups, context)
+                message, message_type = f'Group "{group}" deleted.', "ok"
+
+    return render_template(
+        "terms_manager.html",
+        groups=search_terms.get_groups(),
+        context=search_terms.get_context(),
+        message=message,
+        message_type=message_type,
+    )
 
 
 def _save_digest(today, terms, results, window_label="Any time"):
