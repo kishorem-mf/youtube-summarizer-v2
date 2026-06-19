@@ -5,7 +5,7 @@
     <div class="stats">{{ v.channel }} · {{ "{:,}".format(v.views) }} views · {{ v.date }} · {{ v.duration }}</div>
     <div class="card-actions">
       <a class="btn-summary"
-        href="/video/{{ v.id }}?title={{ v.title | urlencode }}&channel={{ v.channel | urlencode }}&views={{ v.views }}&date={{ v.date }}&duration={{ v.duration | urlencode }}&url={{ v.url | urlencode }}"
+        href="/video/{{ v.id }}?title={{ v.title | urlencode }}&channel={{ v.channel | urlencode }}&views={{ v.views }}&date={{ v.date }}&duration={{ v.duration | urlencode }}&url={{ v.url | urlencode }}&search_term={{ term | urlencode }}"
         target="_blank">
         View Transcript &amp; Summary
       </a>

@@ -9,6 +9,7 @@ import io
 import os
 import re
 import sys
+import threading
 import datetime as dt
 
 # Force UTF-8 stdout/stderr so Windows cp1252 console doesn't choke on emoji in video titles
@@ -25,6 +26,7 @@ from flask import Flask, render_template, request, redirect, url_for  # noqa: E4
 
 from search_terms import SEARCH_GROUPS, all_terms, build_query  # noqa: E402
 import summarizer  # noqa: E402
+import storage     # noqa: E402
 
 app = Flask(__name__)
 DEFAULT_MAX = int(os.environ.get("DEFAULT_MAX_RESULTS", "6"))
@@ -164,7 +166,16 @@ def video_summary():
     if detail not in valid_details:
         detail = DEFAULT_DETAIL
 
+    cached = storage.check_cache(video["id"], detail)
+    if cached:
+        return jsonify(cached)
+
     result = summarizer.fetch_and_summarize(video, detail=detail)
+    if not result.get("error"):
+        result["search_term"] = data.get("search_term", "")
+        threading.Thread(
+            target=storage.save_result, args=(video, detail, result), daemon=True
+        ).start()
     return jsonify(result)
 
 
@@ -173,12 +184,13 @@ def video_page(video_id):
     """Standalone video page: shows metadata, YouTube embed, and detail selector for on-demand summarization."""
     from flask import jsonify
     video = {
-        "id":       video_id,
-        "title":    request.args.get("title", ""),
-        "channel":  request.args.get("channel", ""),
-        "views":    request.args.get("views", "0"),
-        "date":     request.args.get("date", ""),
-        "duration": request.args.get("duration", ""),
+        "id":          video_id,
+        "title":       request.args.get("title", ""),
+        "channel":     request.args.get("channel", ""),
+        "views":       request.args.get("views", "0"),
+        "date":        request.args.get("date", ""),
+        "duration":    request.args.get("duration", ""),
+        "search_term": request.args.get("search_term", ""),
         "url":      request.args.get("url", f"https://www.youtube.com/watch?v={video_id}"),
     }
     return render_template(
@@ -220,6 +232,59 @@ def transcript():
         results=None,
         transcript_result=tr,
     )
+
+
+@app.route("/dynamo", methods=["GET", "POST"])
+def dynamo_explorer():
+    from flask import jsonify
+    from boto3.dynamodb.conditions import Key as DKey
+
+    ctx = dict(rows=None, query_type="get_item", video_id="", detail="",
+               limit="20", query_label="", message=None, message_type=None)
+
+    if request.method == "GET":
+        return render_template("dynamo_explorer.html", **ctx)
+
+    qt       = request.form.get("query_type", "get_item")
+    video_id = request.form.get("video_id", "").strip()
+    detail   = request.form.get("detail", "").strip()
+    limit    = max(1, min(100, int(request.form.get("limit", "20") or "20")))
+    ctx.update(query_type=qt, video_id=video_id, detail=detail, limit=str(limit))
+
+    table = storage._dynamo_table()
+
+    try:
+        if qt == "get_item":
+            if not video_id or not detail:
+                ctx.update(message="Video ID and Detail are required.", message_type="err", rows=[])
+            else:
+                item = table.get_item(Key={"video_id": video_id, "detail": detail}).get("Item")
+                ctx.update(rows=[item] if item else [], query_label=f"get_item · {video_id} / {detail}")
+
+        elif qt == "all_details":
+            if not video_id:
+                ctx.update(message="Video ID is required.", message_type="err", rows=[])
+            else:
+                resp = table.query(KeyConditionExpression=DKey("video_id").eq(video_id))
+                ctx.update(rows=resp.get("Items", []), query_label=f"all details · {video_id}")
+
+        elif qt == "scan_recent":
+            resp = table.scan(Limit=limit)
+            items = sorted(resp.get("Items", []), key=lambda x: x.get("searched_on", ""), reverse=True)
+            ctx.update(rows=items, query_label=f"scan · last {limit} items")
+
+        elif qt == "delete_item":
+            if not video_id or not detail:
+                ctx.update(message="Video ID and Detail are required for delete.", message_type="err", rows=[])
+            else:
+                table.delete_item(Key={"video_id": video_id, "detail": detail})
+                ctx.update(rows=[], message=f"Deleted {video_id} / {detail}", message_type="ok",
+                           query_label=f"delete · {video_id} / {detail}")
+
+    except Exception as e:
+        ctx.update(rows=[], message=f"DynamoDB error: {e}", message_type="err")
+
+    return render_template("dynamo_explorer.html", **ctx)
 
 
 def _save_digest(today, terms, results, window_label="Any time"):

@@ -411,9 +411,11 @@ def fetch_and_summarize(video, detail=DEFAULT_DETAIL):
         return {"transcript": "", "summary": "", "source": "", "wordCount": 0, "language": "", "error": msg}
 
     summary = summarize_video(video, text, detail=detail)
+    tags = _generate_tags(summary)
     return {
         "transcript": text,
         "summary": summary,
+        "tags": tags,
         "source": source,
         "wordCount": len(text.split()),
         "language": lang,
@@ -499,6 +501,26 @@ DEFAULT_DETAIL = "medium"
 
 def _detail_spec(detail):
     return DETAIL_SPECS.get(detail, DETAIL_SPECS[DEFAULT_DETAIL])
+
+
+def _generate_tags(summary):
+    """Ask the LLM for up to 6 tags from the summary. Returns a list of strings."""
+    if not summary or summary.startswith("_"):
+        return []
+    try:
+        resp = _anthropic.messages.create(
+            model=_ANTHROPIC_DEPLOYMENT,
+            system="You are a tagging assistant. Return only a comma-separated list of tags, nothing else.",
+            messages=[{"role": "user", "content": (
+                f"From the following video summary, generate up to 6 concise, lowercase tags "
+                f"that best describe the topic and content. No hashtags.\n\n{summary[:1000]}"
+            )}],
+            max_tokens=60,
+        )
+        raw = resp.content[0].text.strip()
+        return [t.strip().lower() for t in raw.split(",") if t.strip()][:6]
+    except Exception:
+        return []
 
 
 def summarize_video(video, source_text, detail=DEFAULT_DETAIL):

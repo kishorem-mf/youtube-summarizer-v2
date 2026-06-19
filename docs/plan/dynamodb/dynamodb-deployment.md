@@ -89,7 +89,9 @@ Expected: both return `"ACTIVE"` (may take 10–30 seconds after creation).
 
 ---
 
-## Step 3 — Create GSIs (Global Secondary Indexes)
+## Step 3 — Create GSIs *(SKIPPED — deferred)*
+
+> **Skipped intentionally.** Only basic queries (Q1–Q4) are needed for the initial cache implementation. GSIs can be added later via `update-table` with zero downtime when secondary query patterns (channel, language, user history) are required.
 
 ### 3.1 Add `channel-index`
 ```bash
@@ -247,7 +249,7 @@ Expected: returns the cached item(s) for that channel, confirming GSIs are query
 |------|-------|----------------|
 | 1 | IAM + credentials | `aws sts get-caller-identity` |
 | 2 | Create tables | Both tables `ACTIVE` |
-| 3 | Create GSIs | All 4 GSIs `ACTIVE` |
+| 3 | Create GSIs | **SKIPPED** — deferred until secondary queries needed |
 | 4 | App integration | boto3 connects, `put_item`/`get_item` work |
 | 5 | End-to-end | Cache miss → save → cache hit → usage_count increments |
 

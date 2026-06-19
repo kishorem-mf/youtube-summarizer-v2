@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DynamoDB Explorer</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e7e9ee; --mut:#9aa3b2; --accent:#ff4d4f; --good:#3ecf8e; --warn:#f5a623; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px; }
+    header h1 { font-size:18px; margin:0; }
+    header .sub { color:var(--mut); font-size:13px; }
+    header a { color:var(--mut); font-size:13px; text-decoration:none; margin-left:auto; }
+    header a:hover { color:var(--fg); }
+    .wrap { max-width:1300px; margin:0 auto; padding:24px; }
+
+    /* Query form */
+    .query-card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:24px; }
+    .query-card h2 { margin:0 0 16px; font-size:15px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+    .field-row { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+    .field { display:flex; flex-direction:column; gap:5px; }
+    .field label { font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+    input[type=text], select {
+      background:#0f1115; border:1px solid var(--line); color:var(--fg);
+      border-radius:8px; padding:8px 12px; font-size:14px; min-width:200px;
+    }
+    input[type=text]:focus, select:focus { outline:none; border-color:var(--accent); }
+    select { min-width:180px; cursor:pointer; }
+    button.run { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
+    button.run:hover { opacity:.85; }
+    button.del { background:#2a2f3a; color:var(--warn); border:1px solid var(--warn); border-radius:8px; padding:9px 18px; font-weight:600; cursor:pointer; font-size:14px; }
+    button.del:hover { background:var(--warn); color:#000; }
+    #dyn-fields { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+
+    /* Flash messages */
+    .flash { padding:10px 16px; border-radius:8px; margin-bottom:16px; font-size:14px; }
+    .flash.ok  { background:#1a3a2a; border:1px solid var(--good); color:var(--good); }
+    .flash.err { background:#3a1a1a; border:1px solid var(--accent); color:var(--accent); }
+
+    /* Results */
+    .results-header { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+    .results-header h3 { margin:0; font-size:15px; }
+    .badge { background:var(--line); color:var(--mut); border-radius:20px; padding:2px 10px; font-size:12px; }
+    .table-wrap { overflow-x:auto; border-radius:10px; border:1px solid var(--line); }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th { background:#1e222c; color:var(--mut); text-align:left; padding:10px 14px; border-bottom:1px solid var(--line); font-size:12px; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
+    td { padding:10px 14px; border-bottom:1px solid var(--line); vertical-align:top; }
+    tr:last-child td { border-bottom:none; }
+    tr:hover td { background:#1e222c; }
+    .cell-long { max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; margin:1px; }
+    .tag-llm   { background:#2a1a3a; color:#c084fc; }
+    .tag-cache { background:#1a2a1a; color:var(--good); }
+    .no-results { color:var(--mut); font-size:14px; padding:24px; text-align:center; }
+
+    /* Summary expand */
+    .summary-cell { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .summary-toggle { display:inline-flex; align-items:center; gap:6px; cursor:pointer; color:var(--mut); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+    .summary-toggle:hover { color:var(--fg); }
+    .summary-toggle .arrow { flex-shrink:0; font-size:10px; transition:transform .2s; }
+    .summary-toggle.open .arrow { transform:rotate(180deg); }
+    .expand-row { display:none; }
+    .expand-row.visible { display:table-row; }
+    .expand-row td { background:#13161e; padding:16px 20px; border-bottom:1px solid var(--line); }
+    .summary-panel { font-size:14px; line-height:1.7; white-space:pre-wrap; color:var(--fg); max-width:900px; }
+    .summary-panel strong { color:#fff; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>DynamoDB Explorer</h1>
+  <span class="sub">yt-summarizer-cache</span>
+  <a href="/">← Back to app</a>
+</header>
+
+<div class="wrap">
+
+  {% if message %}
+  <div class="flash {{ 'ok' if message_type == 'ok' else 'err' }}">{{ message }}</div>
+  {% endif %}
+
+  <div class="query-card">
+    <h2>Query</h2>
+    <form method="POST" action="/dynamo">
+      <div class="field-row" style="margin-bottom:14px;">
+        <div class="field">
+          <label>Query Type</label>
+          <select name="query_type" id="query_type" onchange="updateFields()">
+            <option value="get_item"     {% if query_type=='get_item'     %}selected{% endif %}>Q1 — Get by Video ID + Detail</option>
+            <option value="all_details"  {% if query_type=='all_details'  %}selected{% endif %}>Q2 — All detail levels for a Video</option>
+            <option value="scan_recent"  {% if query_type=='scan_recent'  %}selected{% endif %}>Q3 — Browse recent items</option>
+            <option value="delete_item"  {% if query_type=='delete_item'  %}selected{% endif %}>Q4 — Delete cache entry</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="dyn-fields" class="field-row">
+        <div class="field" id="f_video_id">
+          <label>Video ID</label>
+          <input type="text" name="video_id" placeholder="e.g. dQw4w9WgXcQ" value="{{ video_id or '' }}">
+        </div>
+        <div class="field" id="f_detail">
+          <label>Detail Level</label>
+          <select name="detail">
+            <option value=""    {% if not detail %}selected{% endif %}>— any —</option>
+            <option value="low" {% if detail=='low' %}selected{% endif %}>low</option>
+            <option value="medium" {% if detail=='medium' %}selected{% endif %}>medium</option>
+            <option value="high" {% if detail=='high' %}selected{% endif %}>high</option>
+          </select>
+        </div>
+        <div class="field" id="f_limit">
+          <label>Limit</label>
+          <input type="text" name="limit" placeholder="20" value="{{ limit or '20' }}" style="min-width:80px;">
+        </div>
+      </div>
+
+      <div class="field-row" style="margin-top:16px;">
+        {% if query_type == 'delete_item' %}
+        <button type="submit" class="del" onclick="return confirm('Delete this cache entry?')">Delete Entry</button>
+        {% else %}
+        <button type="submit" class="run">Run Query</button>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+
+  {% if rows is not none %}
+  <div class="results-header">
+    <h3>Results</h3>
+    <span class="badge">{{ rows|length }} row{{ 's' if rows|length != 1 }}</span>
+    <span class="badge" style="color:var(--mut);">{{ query_label }}</span>
+  </div>
+
+  {% if rows %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Video ID</th>
+          <th>Detail</th>
+          <th>Title</th>
+          <th>Channel</th>
+          <th>Search Term</th>
+          <th>Tags</th>
+          <th>Searched On</th>
+          <th>Source Type</th>
+          <th>Usage</th>
+          <th>Words</th>
+          <th>Language</th>
+          <th>Summary</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td><a href="https://www.youtube.com/watch?v={{ r.video_id }}" target="_blank" style="color:var(--accent);text-decoration:none;">{{ r.video_id }}</a></td>
+          <td>{{ r.detail }}</td>
+          <td class="cell-long" title="{{ r.title }}">{{ r.title }}</td>
+          <td>{{ r.channel }}</td>
+          <td>{{ r.get('search_term', '') }}</td>
+          <td>
+            {% for tag in r.get('tags', []) %}
+            <span class="tag tag-cache">{{ tag }}</span>
+            {% endfor %}
+          </td>
+          <td>{{ r.searched_on }}</td>
+          <td>
+            {% if r.source_type == 'llm' %}
+            <span class="tag tag-llm">llm</span>
+            {% elif r.source_type == 'cache' %}
+            <span class="tag tag-cache">cache</span>
+            {% else %}
+            {{ r.source_type }}
+            {% endif %}
+          </td>
+          <td>{{ r.usage_count }}</td>
+          <td>{{ r.word_count }}</td>
+          <td>{{ r.language }}</td>
+          <td>
+            <span class="summary-toggle" onclick="toggleSummary(this)" data-id="exp-{{ loop.index }}">
+              <span class="arrow">▼</span>
+              <span class="preview">{{ r.summary[:80] | e }}{% if r.summary|length > 80 %}…{% endif %}</span>
+            </span>
+          </td>
+        </tr>
+        <tr class="expand-row" id="exp-{{ loop.index }}">
+          <td colspan="12">
+            <div class="summary-panel" id="panel-{{ loop.index }}">{{ r.summary | e }}</div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="no-results">No results found.</div>
+  {% endif %}
+  {% endif %}
+
+</div>
+
+<script>
+  const FIELDS = {
+    get_item:    ['f_video_id', 'f_detail'],
+    all_details: ['f_video_id'],
+    scan_recent: ['f_limit'],
+    delete_item: ['f_video_id', 'f_detail'],
+  };
+  function updateFields() {
+    const qt = document.getElementById('query_type').value;
+    const show = FIELDS[qt] || [];
+    ['f_video_id','f_detail','f_limit'].forEach(id => {
+      document.getElementById(id).style.display = show.includes(id) ? '' : 'none';
+    });
+  }
+  updateFields();
+
+  function mdlite(text) {
+    return text
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  }
+
+  function toggleSummary(toggle) {
+    const expRow = document.getElementById(toggle.dataset.id);
+    const panel  = document.getElementById(toggle.dataset.id.replace('exp-', 'panel-'));
+    const isOpen = expRow.classList.contains('visible');
+    if (isOpen) {
+      expRow.classList.remove('visible');
+      toggle.classList.remove('open');
+    } else {
+      if (!panel.dataset.rendered) {
+        panel.innerHTML = mdlite(panel.textContent);
+        panel.dataset.rendered = '1';
+      }
+      expRow.classList.add('visible');
+      toggle.classList.add('open');
+      expRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+</script>
+</body>
+</html>

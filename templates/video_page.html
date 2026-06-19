@@ -280,13 +280,14 @@
 
 <script>
   const VIDEO = {
-    id:       {{ video.id | tojson }},
-    url:      {{ video.url | tojson }},
-    title:    {{ video.title | tojson }},
-    channel:  {{ video.channel | tojson }},
-    views:    {{ video.views | tojson }},
-    date:     {{ video.date | tojson }},
-    duration: {{ video.duration | tojson }},
+    id:          {{ video.id | tojson }},
+    url:         {{ video.url | tojson }},
+    title:       {{ video.title | tojson }},
+    channel:     {{ video.channel | tojson }},
+    views:       {{ video.views | tojson }},
+    date:        {{ video.date | tojson }},
+    duration:    {{ video.duration | tojson }},
+    search_term: {{ video.search_term | tojson }},
   };
 
   function getDetail() {
@@ -321,14 +322,15 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          video_id: VIDEO.id,
-          url:      VIDEO.url,
-          title:    VIDEO.title,
-          channel:  VIDEO.channel,
-          views:    VIDEO.views,
-          date:     VIDEO.date,
-          duration: VIDEO.duration,
-          detail:   detail,
+          video_id:    VIDEO.id,
+          url:         VIDEO.url,
+          title:       VIDEO.title,
+          channel:     VIDEO.channel,
+          views:       VIDEO.views,
+          date:        VIDEO.date,
+          duration:    VIDEO.duration,
+          detail:      detail,
+          search_term: VIDEO.search_term || "",
         }),
       });
       const data = await resp.json();
