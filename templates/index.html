@@ -20,7 +20,10 @@
     .wrap { max-width:1100px; margin:0 auto; padding:24px; }
     form.controls { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
     .groups { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
-    .group h3 { margin:0 0 8px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); }
+    .group h3 { margin:0 0 6px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); display:flex; align-items:center; gap:8px; }
+    .select-all-label { display:flex; align-items:center; gap:5px; font-size:11px; font-weight:400; text-transform:none; letter-spacing:0; color:var(--mut); cursor:pointer; margin-left:auto; white-space:nowrap; }
+    .select-all-label:hover { color:var(--fg); }
+    .group-divider { border:none; border-top:1px solid var(--line); margin:4px 0 6px; }
     label.term { display:flex; gap:8px; align-items:center; padding:3px 0; font-size:14px; cursor:pointer; }
     .row { display:flex; flex-wrap:wrap; gap:18px; align-items:center; margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
     .row label { font-size:13px; color:var(--mut); display:flex; align-items:center; gap:6px; }
@@ -70,11 +73,22 @@
   <form class="controls" method="post" action="/run">
     <div class="groups">
       {% for gname, terms in groups.items() %}
+      {% set gid = gname | replace(' ','_') | replace('/','_') %}
       <div class="group">
-        <h3>{{ gname }}</h3>
+        <h3>
+          {{ gname }}
+          <label class="select-all-label">
+            <input type="checkbox" class="select-all" data-group="{{ gid }}"
+              onchange="toggleGroup(this)">
+            Select all
+          </label>
+        </h3>
+        <hr class="group-divider">
         {% for t in terms %}
         <label class="term">
           <input type="checkbox" name="terms" value="{{ t }}"
+            class="term-cb" data-group="{{ gid }}"
+            onchange="syncSelectAll('{{ gid }}')"
             {% if selected and t in selected %}checked{% endif %}>
           {{ t }}
         </label>
@@ -201,6 +215,37 @@
 </div>
 
 <script>
+function toggleGroup(masterCb) {
+  const group = masterCb.dataset.group;
+  const checked = masterCb.checked;
+  document.querySelectorAll('.term-cb[data-group="' + group + '"]')
+    .forEach(cb => { cb.checked = checked; });
+}
+
+function syncSelectAll(group) {
+  const cbs    = [...document.querySelectorAll('.term-cb[data-group="' + group + '"]')];
+  const master = document.querySelector('.select-all[data-group="' + group + '"]');
+  if (!master) return;
+  const checkedCount = cbs.filter(cb => cb.checked).length;
+  if (checkedCount === 0) {
+    master.checked = false;
+    master.indeterminate = false;
+  } else if (checkedCount === cbs.length) {
+    master.checked = true;
+    master.indeterminate = false;
+  } else {
+    master.checked = false;
+    master.indeterminate = true;
+  }
+}
+
+// Initialise all select-all states on page load
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('.select-all').forEach(function(master) {
+    syncSelectAll(master.dataset.group);
+  });
+});
+
 function showTab(tid, which, btn) {
   document.getElementById('tab-'+tid+'-top').style.display   = (which==='top')   ? 'grid' : 'none';
   document.getElementById('tab-'+tid+'-trend').style.display = (which==='trend') ? 'grid' : 'none';

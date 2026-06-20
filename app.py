@@ -247,7 +247,7 @@ def dynamo_explorer():
 
     if request.method == "GET":
         ctx["active_tab"] = "dynamo"
-    return render_template("dynamo_explorer.html", **ctx)
+        return render_template("dynamo_explorer.html", **ctx)
 
     qt       = request.form.get("query_type", "get_item")
     video_id = request.form.get("video_id", "").strip()
@@ -390,6 +390,101 @@ def _save_digest(today, terms, results, window_label="Any time"):
     path = os.path.join(OUTPUTS, f"digest_{today}.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+
+
+@app.route("/linkedin", methods=["GET", "POST"])
+def linkedin_page():
+    import linkedin_generator as lg
+    from flask import send_file
+    import io
+
+    ctx = dict(
+        active_tab="linkedin",
+        recent_items=[],
+        video_data=None,
+        post_text=None,
+        error=None,
+        video_id="",
+        detail="high",
+        post_style="tips",
+        customization="",
+        temperature=0.7,
+    )
+
+    try:
+        ctx["recent_items"] = lg.list_recent(50)
+    except Exception as e:
+        ctx["error"] = f"Could not load DynamoDB items: {e}"
+
+    if request.method == "POST":
+        video_id      = request.form.get("video_id", "").strip()
+        detail        = request.form.get("detail", "high").strip()
+        post_style    = request.form.get("post_style", "tips").strip()
+        customization = request.form.get("customization", "").strip()
+        try:
+            temperature = round(float(request.form.get("temperature", "0.7")), 2)
+            temperature = max(0.0, min(1.0, temperature))
+        except ValueError:
+            temperature = 0.7
+        ctx.update(video_id=video_id, detail=detail, post_style=post_style,
+                   customization=customization, temperature=temperature)
+
+        if not video_id:
+            ctx["error"] = "Please select or enter a Video ID."
+            return render_template("linkedin.html", **ctx)
+
+        video_data = lg.get_video(video_id, detail)
+        if not video_data:
+            ctx["error"] = f"No cached entry found for video_id={video_id!r}, detail={detail!r}. Run a summary first."
+            return render_template("linkedin.html", **ctx)
+
+        ctx["video_data"] = video_data
+
+        post_text  = lg.generate_post_text(video_data, post_style=post_style,
+                                            customization=customization, temperature=temperature)
+        slides     = lg.generate_slide_data(video_data, post_style=post_style)
+        pdf_bytes  = lg.build_pdf(slides, video_data)
+        paths      = lg.save_outputs(video_id, detail, post_text, pdf_bytes)
+
+        ctx["post_text"] = post_text
+        ctx["pdf_path"]  = paths["pdf"]
+        ctx["txt_path"]  = paths["txt"]
+
+        # If user clicked the PDF download button, serve the file directly
+        if request.form.get("action") == "download_pdf":
+            return send_file(
+                io.BytesIO(pdf_bytes),
+                mimetype="application/pdf",
+                as_attachment=True,
+                download_name=f"{video_id}_{detail}_carousel.pdf",
+            )
+
+    return render_template("linkedin.html", **ctx)
+
+
+@app.route("/linkedin/download")
+def linkedin_download():
+    """Serve the most recently generated LinkedIn PDF or TXT."""
+    from flask import send_file, abort
+    import glob as _glob
+
+    file_type = request.args.get("type", "pdf")
+    video_id  = request.args.get("video_id", "")
+    detail    = request.args.get("detail", "")
+
+    base = os.path.join(OUTPUTS, "linkedin")
+    ext  = "pdf" if file_type == "pdf" else "txt"
+    suffix = "_carousel.pdf" if ext == "pdf" else "_post.txt"
+    pattern = os.path.join(base, "*", f"{video_id}_{detail}{suffix}")
+    matches = sorted(_glob.glob(pattern), reverse=True)
+    if not matches:
+        abort(404)
+    return send_file(
+        matches[0],
+        mimetype="application/pdf" if ext == "pdf" else "text/plain",
+        as_attachment=True,
+        download_name=os.path.basename(matches[0]),
+    )
 
 
 if __name__ == "__main__":

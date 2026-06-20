@@ -24,7 +24,7 @@ _anthropic = _anthropic_sdk.Anthropic(
     base_url=os.environ.get("ANTHROPIC_FOUNDRY_ENDPOINT", "https://nandamagatala-8810-resource.services.ai.azure.com/anthropic/v1"),
     http_client=_httpx.Client(verify=False),
 )
-_ANTHROPIC_DEPLOYMENT = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-sonnet-4-6")
+_ANTHROPIC_DEPLOYMENT = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-opus-4-8")
 
 _APIFY_TOKEN = os.environ.get("APIFY_API_KEY", "")
 _APIFY_BASE = "https://api.apify.com/v2/acts"
