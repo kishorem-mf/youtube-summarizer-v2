@@ -90,6 +90,7 @@ def generate_post_text(
         url           = video_data.get("url", f"https://www.youtube.com/watch?v={video_data.get('video_id', '')}"),
         post_style    = post_style,
         customization = customization,
+        temperature   = temperature,
     )
     try:
         resp = _anthropic.messages.create(
@@ -97,7 +98,6 @@ def generate_post_text(
             system=prompts.LINKEDIN_POST_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
             max_tokens=600,
-            temperature=round(float(temperature), 2),
         )
         return resp.content[0].text.strip()
     except Exception as e:
@@ -325,7 +325,7 @@ def _draw_slide(c, slide, stype, num, total, channel, yt_url, tags, size, theme_
 
     # Slide number indicator (bottom-right)
     c.setFillColorRGB(*_C_MUT)
-    c.setFont("Helvetica", 11)
+    c.setFont("Helvetica", 22)
     c.drawRightString(W - pad, pad * 0.6, f"{num} / {total}")
 
 
@@ -352,7 +352,7 @@ def _draw_title_slide(c, slide, channel, tags, W, H, pad):
     usable = W - pad * 2
 
     # Draw heading
-    h_size = 42
+    h_size = 84
     c.setFont("Helvetica-Bold", h_size)
     lines  = simpleSplit(heading, "Helvetica-Bold", h_size, usable)
     total_h = len(lines) * h_size * 1.3
@@ -366,15 +366,15 @@ def _draw_title_slide(c, slide, channel, tags, W, H, pad):
 
     # Subheading
     y -= 10
-    c.setFont("Helvetica", 22)
+    c.setFont("Helvetica", 44)
     c.setFillColorRGB(*_C_MUT)
-    sub_lines = simpleSplit(subheading, "Helvetica", 22, usable)
+    sub_lines = simpleSplit(subheading, "Helvetica", 44, usable)
     for line in sub_lines:
         c.drawCentredString(W / 2, y, line)
-        y -= 22 * 1.4
+        y -= 44 * 1.4
 
     # Channel credit (bottom-left)
-    c.setFont("Helvetica", 13)
+    c.setFont("Helvetica", 26)
     c.setFillColorRGB(*_C_MUT)
     c.drawString(pad, pad * 0.6 + 14, channel)
 
@@ -394,11 +394,11 @@ def _draw_insight_slide(c, slide, W, H, pad):
 
     # Heading
     y = H * 0.72
-    _wrap_text(c, heading, pad, y, usable, "Helvetica-Bold", 36, _C_WHITE, line_height=36 * 1.3)
+    _wrap_text(c, heading, pad, y, usable, "Helvetica-Bold", 72, _C_WHITE, line_height=72 * 1.3)
 
     # Body
     y = H * 0.54
-    _wrap_text(c, body, pad, y, usable, "Helvetica", 22, _C_MUT, line_height=22 * 1.55)
+    _wrap_text(c, body, pad, y, usable, "Helvetica", 44, _C_MUT, line_height=44 * 1.55)
 
 
 def _draw_cta_slide(c, slide, yt_url, channel, W, H, pad):
@@ -411,27 +411,28 @@ def _draw_cta_slide(c, slide, yt_url, channel, W, H, pad):
     c.rect(0, H * 0.45, W, H * 0.12, fill=1, stroke=0)
 
     # Heading on accent strip
-    c.setFont("Helvetica-Bold", 30)
+    c.setFont("Helvetica-Bold", 60)
     c.setFillColorRGB(*_C_WHITE)
     c.drawCentredString(W / 2, H * 0.48 + 14, heading)
 
     # Body below
     y = H * 0.40
-    _wrap_text(c, body, pad, y, usable, "Helvetica", 20, _C_MUT)
+    _wrap_text(c, body, pad, y, usable, "Helvetica", 40, _C_MUT)
 
     # Branding
-    c.setFont("Helvetica", 12)
+    c.setFont("Helvetica", 24)
     c.setFillColorRGB(*_C_MUT)
     c.drawCentredString(W / 2, pad * 0.6 + 14, f"Source: {channel} on YouTube")
 
 
+
 def _draw_tags(c, tags, cx, y, W):
     """Draw small tag chips centred around cx at height y."""
-    c.setFont("Helvetica", 11)
+    c.setFont("Helvetica", 22)
     chip_h   = 18
     chip_pad = 8
     gap      = 6
-    widths   = [c.stringWidth(t, "Helvetica", 11) + chip_pad * 2 for t in tags]
+    widths   = [c.stringWidth(t, "Helvetica", 22) + chip_pad * 2 for t in tags]
     total_w  = sum(widths) + gap * (len(tags) - 1)
     x        = cx - total_w / 2
 

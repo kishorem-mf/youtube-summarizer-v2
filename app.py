@@ -400,7 +400,6 @@ def linkedin_page():
 
     ctx = dict(
         active_tab="linkedin",
-        recent_items=[],
         video_data=None,
         post_text=None,
         error=None,
@@ -410,11 +409,6 @@ def linkedin_page():
         customization="",
         temperature=0.7,
     )
-
-    try:
-        ctx["recent_items"] = lg.list_recent(50)
-    except Exception as e:
-        ctx["error"] = f"Could not load DynamoDB items: {e}"
 
     if request.method == "POST":
         video_id      = request.form.get("video_id", "").strip()
@@ -462,6 +456,23 @@ def linkedin_page():
     return render_template("linkedin.html", **ctx)
 
 
+@app.route("/linkedin/videos")
+def linkedin_videos():
+    """Return recent DynamoDB items as JSON for the LinkedIn dropdown."""
+    from flask import jsonify
+    import linkedin_generator as lg
+    try:
+        items = lg.list_recent(50)
+        return jsonify([{
+            "video_id": i.get("video_id", ""),
+            "detail":   i.get("detail", ""),
+            "title":    i.get("title", ""),
+            "channel":  i.get("channel", ""),
+        } for i in items])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/linkedin/download")
 def linkedin_download():
     """Serve the most recently generated LinkedIn PDF or TXT."""
@@ -485,6 +496,111 @@ def linkedin_download():
         as_attachment=True,
         download_name=os.path.basename(matches[0]),
     )
+
+
+@app.route("/mixer", methods=["GET"])
+def mixer_page():
+    return render_template("mixer.html", active_tab="mixer",
+                           post_text=None, error=None,
+                           sc_video_id="", sc_detail="high",
+                           tech_video_id="", tech_detail="high",
+                           score=None, headline=None, reasoning=None,
+                           customization="")
+
+
+@app.route("/mixer/score", methods=["POST"])
+def mixer_score():
+    from flask import jsonify
+    import mixer_generator as mg
+    data = request.get_json(force=True) or {}
+    sc_video_id   = data.get("sc_video_id", "").strip()
+    sc_detail     = data.get("sc_detail", "high").strip()
+    tech_video_id = data.get("tech_video_id", "").strip()
+    tech_detail   = data.get("tech_detail", "high").strip()
+
+    if not sc_video_id or not tech_video_id:
+        return jsonify({"error": "Both videos must be selected."}), 400
+
+    sc_data   = mg.get_video(sc_video_id, sc_detail)
+    tech_data = mg.get_video(tech_video_id, tech_detail)
+    if not sc_data:
+        return jsonify({"error": f"Supply chain video not found: {sc_video_id} / {sc_detail}"}), 404
+    if not tech_data:
+        return jsonify({"error": f"Technology video not found: {tech_video_id} / {tech_detail}"}), 404
+
+    result = mg.score_fit(sc_data, tech_data)
+    result["sc_title"]   = sc_data.get("title", "")
+    result["tech_title"] = tech_data.get("title", "")
+    return jsonify(result)
+
+
+@app.route("/mixer/generate", methods=["POST"])
+def mixer_generate():
+    import mixer_generator as mg
+    import linkedin_generator as lg
+
+    sc_video_id   = request.form.get("sc_video_id", "").strip()
+    sc_detail     = request.form.get("sc_detail", "high").strip()
+    tech_video_id = request.form.get("tech_video_id", "").strip()
+    tech_detail   = request.form.get("tech_detail", "high").strip()
+    customization = request.form.get("customization", "").strip()
+    try:
+        score = int(request.form.get("score", "0"))
+    except ValueError:
+        score = 0
+    reasoning = request.form.get("reasoning", "")
+    headline  = request.form.get("headline", "")
+
+    ctx = dict(active_tab="mixer", post_text=None, error=None,
+               sc_video_id=sc_video_id, sc_detail=sc_detail,
+               tech_video_id=tech_video_id, tech_detail=tech_detail,
+               score=score, headline=headline, reasoning=reasoning,
+               customization=customization)
+
+    sc_data   = mg.get_video(sc_video_id, sc_detail)
+    tech_data = mg.get_video(tech_video_id, tech_detail)
+    if not sc_data or not tech_data:
+        ctx["error"] = "Could not reload video data. Please re-score first."
+        return render_template("mixer.html", **ctx)
+
+    post_text = mg.generate_post(sc_data, tech_data, score, reasoning, customization)
+    slides    = mg.generate_slides(sc_data, tech_data, score, reasoning)
+
+    combined_data = {
+        "channel":  f"{sc_data.get('channel','')} × {tech_data.get('channel','')}",
+        "title":    f"{sc_data.get('title','')} × {tech_data.get('title','')}",
+        "url":      sc_data.get("url", ""),
+        "video_id": f"mixer_{sc_video_id}_{tech_video_id}",
+        "tags":     list(set(list(sc_data.get("tags", [])) + list(tech_data.get("tags", [])))),
+    }
+    pdf_bytes = lg.build_pdf(slides, combined_data)
+    paths     = lg.save_outputs(
+        f"mixer_{sc_video_id}", f"{tech_video_id}_{sc_detail}_{tech_detail}",
+        post_text, pdf_bytes,
+    )
+
+    ctx.update(post_text=post_text,
+               pdf_stem=f"mixer_{sc_video_id}_{tech_video_id}_{sc_detail}_{tech_detail}",
+               pdf_path=paths["pdf"], txt_path=paths["txt"])
+    return render_template("mixer.html", **ctx)
+
+
+@app.route("/mixer/download")
+def mixer_download():
+    from flask import send_file, abort
+    import glob as _glob
+
+    file_type = request.args.get("type", "pdf")
+    stem      = request.args.get("stem", "")
+    base      = os.path.join(OUTPUTS, "linkedin")
+    suffix    = "_carousel.pdf" if file_type == "pdf" else "_post.txt"
+    pattern   = os.path.join(base, "*", f"{stem}{suffix}")
+    matches   = sorted(_glob.glob(pattern), reverse=True)
+    if not matches:
+        abort(404)
+    mime = "application/pdf" if file_type == "pdf" else "text/plain"
+    return send_file(matches[0], mimetype=mime, as_attachment=True,
+                     download_name=os.path.basename(matches[0]))
 
 
 if __name__ == "__main__":

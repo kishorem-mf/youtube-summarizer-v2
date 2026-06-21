@@ -106,16 +106,9 @@
         <div class="field">
           <label>Video (from DynamoDB cache)</label>
           <select name="video_id" id="video_select">
-            <option value="">— choose a cached video —</option>
-            {% for item in recent_items %}
-            <option value="{{ item.video_id }}"
-              data-detail="{{ item.detail }}"
-              {% if item.video_id == video_id and item.detail == detail %}selected{% endif %}>
-              {{ item.title[:70] }}{% if item.title|length > 70 %}…{% endif %}
-              ({{ item.detail }}) · {{ item.channel }}
-            </option>
-            {% endfor %}
+            <option value="">Loading cached videos…</option>
           </select>
+          <span id="videos-status" style="font-size:12px;color:var(--mut);margin-top:4px;display:none;"></span>
         </div>
         <div class="field">
           <label>Detail level</label>
@@ -259,6 +252,44 @@
   }
   // Initialise label on page load
   updateTempLabel(document.getElementById('temp-slider').value);
+
+  // Load video dropdown asynchronously so the page renders immediately
+  (function loadVideos() {
+    const sel    = document.getElementById('video_select');
+    const status = document.getElementById('videos-status');
+    const savedVideoId = "{{ video_id | e }}";
+    const savedDetail  = "{{ detail | e }}";
+
+    fetch('/linkedin/videos')
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          sel.innerHTML = '<option value="">Error loading videos</option>';
+          status.textContent = data.error;
+          status.style.display = 'block';
+          return;
+        }
+        sel.innerHTML = '<option value="">— choose a cached video —</option>';
+        data.forEach(function(item) {
+          const opt   = document.createElement('option');
+          opt.value   = item.video_id;
+          opt.dataset.detail = item.detail;
+          const label = (item.title.length > 70 ? item.title.slice(0, 70) + '…' : item.title)
+                      + ' (' + item.detail + ') · ' + item.channel;
+          opt.textContent = label;
+          if (item.video_id === savedVideoId && item.detail === savedDetail) {
+            opt.selected = true;
+          }
+          sel.appendChild(opt);
+        });
+        status.style.display = 'none';
+      })
+      .catch(function(err) {
+        sel.innerHTML = '<option value="">Could not load videos</option>';
+        status.textContent = 'Network error: ' + err;
+        status.style.display = 'block';
+      });
+  })();
 
   // Auto-sync detail level when a video is picked from the dropdown
   document.getElementById('video_select').addEventListener('change', function() {
