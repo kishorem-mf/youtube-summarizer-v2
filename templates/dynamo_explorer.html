@@ -91,6 +91,8 @@
             <option value="all_details"  {% if query_type=='all_details'  %}selected{% endif %}>Q2 — All detail levels for a Video</option>
             <option value="scan_recent"  {% if query_type=='scan_recent'  %}selected{% endif %}>Q3 — Browse recent items</option>
             <option value="delete_item"  {% if query_type=='delete_item'  %}selected{% endif %}>Q4 — Delete cache entry</option>
+            <option value="by_topic"     {% if query_type=='by_topic'     %}selected{% endif %}>Q5 — Search by Topic (search_term)</option>
+            <option value="by_tag"       {% if query_type=='by_tag'       %}selected{% endif %}>Q6 — Search by Tag</option>
           </select>
         </div>
       </div>
@@ -107,6 +109,18 @@
             <option value="low" {% if detail=='low' %}selected{% endif %}>low</option>
             <option value="medium" {% if detail=='medium' %}selected{% endif %}>medium</option>
             <option value="high" {% if detail=='high' %}selected{% endif %}>high</option>
+          </select>
+        </div>
+        <div class="field" id="f_search_term">
+          <label>Topic (search_term)</label>
+          <select name="search_term" id="search_term_select" style="min-width:240px;">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div class="field" id="f_tag">
+          <label>Tag <span style="color:var(--mut);text-transform:none;letter-spacing:0;">(subtopic)</span></label>
+          <select name="tag" id="tag_select" style="min-width:180px;">
+            <option value="">Loading…</option>
           </select>
         </div>
         <div class="field" id="f_limit">
@@ -206,15 +220,69 @@
     all_details: ['f_video_id'],
     scan_recent: ['f_limit'],
     delete_item: ['f_video_id', 'f_detail'],
+    by_topic:    ['f_search_term', 'f_tag', 'f_limit'],
+    by_tag:      ['f_tag', 'f_limit'],
   };
   function updateFields() {
     const qt = document.getElementById('query_type').value;
     const show = FIELDS[qt] || [];
-    ['f_video_id','f_detail','f_limit'].forEach(id => {
+    ['f_video_id','f_detail','f_search_term','f_tag','f_limit'].forEach(id => {
       document.getElementById(id).style.display = show.includes(id) ? '' : 'none';
     });
   }
   updateFields();
+
+  // Populate search_term and tag dropdowns from /dynamo/filters
+  let topicTagsMap = {};  // {search_term: [tags]}
+  let allTags      = [];
+
+  function populateTagDropdown(tags, savedTag) {
+    const tagSel = document.getElementById('tag_select');
+    tagSel.innerHTML = '<option value="">— all tags —</option>';
+    tags.forEach(t => {
+      const o = document.createElement('option');
+      o.value = t; o.textContent = t;
+      if (t === savedTag) o.selected = true;
+      tagSel.appendChild(o);
+    });
+  }
+
+  (function loadFilters() {
+    const savedTerm = "{{ search_term | e }}";
+    const savedTag  = "{{ tag | e }}";
+    fetch('/dynamo/filters')
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) return;
+        topicTagsMap = data.topic_tags || {};
+        allTags      = data.tags || [];
+
+        const termSel = document.getElementById('search_term_select');
+        termSel.innerHTML = '<option value="">— all topics —</option>';
+        data.search_terms.forEach(t => {
+          const o = document.createElement('option');
+          o.value = t; o.textContent = t;
+          if (t === savedTerm) o.selected = true;
+          termSel.appendChild(o);
+        });
+
+        // Populate tags — filtered if a topic is pre-selected
+        const initialTags = savedTerm && topicTagsMap[savedTerm]
+          ? topicTagsMap[savedTerm] : allTags;
+        populateTagDropdown(initialTags, savedTag);
+      })
+      .catch(() => {
+        document.getElementById('search_term_select').innerHTML = '<option value="">Error loading topics</option>';
+        document.getElementById('tag_select').innerHTML = '<option value="">Error loading tags</option>';
+      });
+  })();
+
+  // Filter tags when topic changes
+  document.getElementById('search_term_select').addEventListener('change', function() {
+    const term = this.value;
+    const tags = term && topicTagsMap[term] ? topicTagsMap[term] : allTags;
+    populateTagDropdown(tags, '');
+  });
 
   function mdlite(text) {
     return text

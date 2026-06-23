@@ -243,17 +243,21 @@ def dynamo_explorer():
     from boto3.dynamodb.conditions import Key as DKey
 
     ctx = dict(rows=None, query_type="get_item", video_id="", detail="",
-               limit="20", query_label="", message=None, message_type=None)
+               limit="20", search_term="", tag="",
+               query_label="", message=None, message_type=None)
 
     if request.method == "GET":
         ctx["active_tab"] = "dynamo"
         return render_template("dynamo_explorer.html", **ctx)
 
-    qt       = request.form.get("query_type", "get_item")
-    video_id = request.form.get("video_id", "").strip()
-    detail   = request.form.get("detail", "").strip()
-    limit    = max(1, min(100, int(request.form.get("limit", "20") or "20")))
-    ctx.update(query_type=qt, video_id=video_id, detail=detail, limit=str(limit))
+    qt          = request.form.get("query_type", "get_item")
+    video_id    = request.form.get("video_id", "").strip()
+    detail      = request.form.get("detail", "").strip()
+    search_term = request.form.get("search_term", "").strip()
+    tag         = request.form.get("tag", "").strip()
+    limit       = max(1, min(100, int(request.form.get("limit", "20") or "20")))
+    ctx.update(query_type=qt, video_id=video_id, detail=detail,
+               search_term=search_term, tag=tag, limit=str(limit))
 
     table = storage._dynamo_table()
 
@@ -285,11 +289,73 @@ def dynamo_explorer():
                 ctx.update(rows=[], message=f"Deleted {video_id} / {detail}", message_type="ok",
                            query_label=f"delete · {video_id} / {detail}")
 
+        elif qt == "by_topic":
+            from boto3.dynamodb.conditions import Key as DKey, Attr
+            if not search_term:
+                ctx.update(message="Topic (search_term) is required.", message_type="err", rows=[])
+            else:
+                kce = DKey("search_term").eq(search_term)
+                kwargs = dict(IndexName="search_term-index",
+                              KeyConditionExpression=kce, Limit=limit)
+                if tag:
+                    kwargs["FilterExpression"] = Attr("tags").contains(tag)
+                resp  = table.query(**kwargs)
+                label = f"topic · {search_term}" + (f" + tag · {tag}" if tag else "")
+                ctx.update(rows=resp.get("Items", []), query_label=label)
+
+        elif qt == "by_tag":
+            from boto3.dynamodb.conditions import Attr
+            if not tag:
+                ctx.update(message="Tag is required.", message_type="err", rows=[])
+            else:
+                resp  = table.scan(FilterExpression=Attr("tags").contains(tag), Limit=limit)
+                ctx.update(rows=resp.get("Items", []), query_label=f"tag · {tag}")
+
     except Exception as e:
         ctx.update(rows=[], message=f"DynamoDB error: {e}", message_type="err")
 
     ctx["active_tab"] = "dynamo"
     return render_template("dynamo_explorer.html", **ctx)
+
+
+@app.route("/dynamo/filters")
+def dynamo_filters():
+    """Return distinct search_terms and tags for dropdown population."""
+    from flask import jsonify
+    table = storage._dynamo_table()
+    try:
+        from collections import Counter
+        topic_tags = {}  # {search_term: Counter of tags}
+        last = None
+        while True:
+            kwargs = {"ProjectionExpression": "search_term, tags"}
+            if last:
+                kwargs["ExclusiveStartKey"] = last
+            resp = table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                t = (item.get("search_term") or "").strip()
+                if t:
+                    if t not in topic_tags:
+                        topic_tags[t] = Counter()
+                    topic_tags[t].update(item.get("tags", []))
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                break
+        all_tags = sorted(
+            set(tag for c in topic_tags.values() for tag in c),
+            key=str.lower
+        )
+        return jsonify({
+            "search_terms": sorted(topic_tags.keys(), key=str.lower),
+            "tags":         all_tags,
+            # Tags sorted by frequency desc, ties broken alphabetically
+            "topic_tags": {
+                t: [tag for tag, _ in sorted(c.items(), key=lambda x: (-x[1], x[0].lower()))]
+                for t, c in topic_tags.items()
+            },
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/terms", methods=["GET", "POST"])
@@ -496,6 +562,25 @@ def linkedin_download():
         as_attachment=True,
         download_name=os.path.basename(matches[0]),
     )
+
+
+@app.route("/mixer/videos")
+def mixer_videos():
+    """Return cached DynamoDB items for Mixer dropdowns — includes search_term and tags."""
+    from flask import jsonify
+    import mixer_generator as mg
+    try:
+        items = mg.list_recent(100)
+        return jsonify([{
+            "video_id":    i.get("video_id", ""),
+            "detail":      i.get("detail", ""),
+            "title":       i.get("title", ""),
+            "channel":     i.get("channel", ""),
+            "search_term": i.get("search_term", ""),
+            "tags":        list(i.get("tags", [])),
+        } for i in items])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/mixer", methods=["GET"])
