@@ -352,7 +352,7 @@ def _draw_title_slide(c, slide, channel, tags, W, H, pad):
     usable = W - pad * 2
 
     # Draw heading
-    h_size = 84
+    h_size = 42
     c.setFont("Helvetica-Bold", h_size)
     lines  = simpleSplit(heading, "Helvetica-Bold", h_size, usable)
     total_h = len(lines) * h_size * 1.3
@@ -373,11 +373,6 @@ def _draw_title_slide(c, slide, channel, tags, W, H, pad):
         c.drawCentredString(W / 2, y, line)
         y -= 44 * 1.4
 
-    # Channel credit (bottom-left)
-    c.setFont("Helvetica", 26)
-    c.setFillColorRGB(*_C_MUT)
-    c.drawString(pad, pad * 0.6 + 14, channel)
-
     # Tag chips (bottom centre area)
     if tags:
         _draw_tags(c, tags[:4], W / 2, pad + 28, W)
@@ -394,7 +389,7 @@ def _draw_insight_slide(c, slide, W, H, pad):
 
     # Heading
     y = H * 0.72
-    _wrap_text(c, heading, pad, y, usable, "Helvetica-Bold", 72, _C_WHITE, line_height=72 * 1.3)
+    _wrap_text(c, heading, pad, y, usable, "Helvetica-Bold", 36, _C_WHITE, line_height=36 * 1.3)
 
     # Body
     y = H * 0.54
@@ -411,7 +406,7 @@ def _draw_cta_slide(c, slide, yt_url, channel, W, H, pad):
     c.rect(0, H * 0.45, W, H * 0.12, fill=1, stroke=0)
 
     # Heading on accent strip
-    c.setFont("Helvetica-Bold", 60)
+    c.setFont("Helvetica-Bold", 30)
     c.setFillColorRGB(*_C_WHITE)
     c.drawCentredString(W / 2, H * 0.48 + 14, heading)
 
