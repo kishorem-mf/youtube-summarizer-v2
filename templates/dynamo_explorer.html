@@ -69,6 +69,34 @@
     .expand-row td { background:#13161e; padding:16px 20px; border-bottom:1px solid var(--line); }
     .summary-panel { font-size:14px; line-height:1.7; white-space:pre-wrap; color:var(--fg); max-width:900px; }
     .summary-panel strong { color:#fff; }
+
+    /* Row selection + LinkedIn export */
+    input[type=checkbox].row-check { cursor:pointer; accent-color:var(--accent); width:15px; height:15px; }
+    tr.row-selected td { background:#1e1a24 !important; }
+    #export-toolbar { display:none; position:fixed; bottom:0; left:0; right:0;
+      background:#1a1d24; border-top:2px solid var(--accent); padding:12px 24px;
+      z-index:100; align-items:center; gap:16px; }
+    #export-toolbar.visible { display:flex; }
+    #export-count { color:var(--accent); font-weight:600; font-size:14px; white-space:nowrap; }
+    button.li-export { background:var(--accent); color:#fff; border:0; border-radius:8px;
+      padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
+    button.li-export:disabled { opacity:.5; cursor:default; }
+    button.li-clear { background:var(--line); color:var(--fg); border:0; border-radius:8px;
+      padding:9px 18px; font-weight:600; cursor:pointer; font-size:14px; }
+    #li-modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:200; }
+    #li-modal-backdrop.visible { display:flex; align-items:center; justify-content:center; }
+    #li-modal { background:var(--card); border:1px solid var(--line); border-radius:14px;
+      width:min(660px,95vw); padding:24px; display:flex; flex-direction:column; gap:14px; max-height:90vh; overflow-y:auto; }
+    #li-modal h3 { margin:0; font-size:15px; }
+    #li-post-textarea { width:100%; min-height:220px; background:#0f1115; border:1px solid var(--line);
+      color:var(--fg); border-radius:8px; padding:12px; font-size:14px; line-height:1.6; resize:vertical; font-family:inherit; }
+    #li-hashtags { color:var(--accent); font-size:13px; word-break:break-word; }
+    #li-charcount { font-size:12px; color:var(--mut); }
+    .li-modal-actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button.li-copy { background:var(--good); color:#000; border:0; border-radius:8px;
+      padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
+    button.li-regen { background:var(--line); color:var(--fg); border:0; border-radius:8px;
+      padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
   </style>
 </head>
 <body>
@@ -158,6 +186,7 @@
     <table>
       <thead>
         <tr>
+          <th style="width:36px;"><input type="checkbox" class="row-check" id="check-all" title="Select all"></th>
           <th>ID</th>
           <th>Platform</th>
           <th>Detail</th>
@@ -176,6 +205,10 @@
       <tbody>
         {% for r in rows %}
         <tr>
+          <td style="width:36px;">
+            <input type="checkbox" class="row-check row-item"
+              data-row='{{ {"video_id": r.video_id, "detail": r.detail, "title": r.title, "author": r.get("author") or r.channel, "tags": r.get("tags", []), "url": r.get("url", ""), "source_platform": r.get("source_platform", "")} | tojson | e }}'>
+          </td>
           <td>
             {% if r.get('url') %}
             <a href="{{ r.url }}" target="_blank" style="color:var(--accent);text-decoration:none;" title="{{ r.video_id }}">{{ r.video_id[:14] }}</a>
@@ -218,12 +251,15 @@
           <td>{{ r.usage_count }}</td>
           <td>{{ r.word_count }}</td>
           <td>
-            <span class="summary-toggle" onclick="toggleSummary(this)" data-id="exp-{{ loop.index }}">
+            <span class="summary-toggle" onclick="toggleSummary(this)"
+                  data-id="exp-{{ loop.index }}"
+                  data-video-id="{{ r.video_id | e }}"
+                  data-detail="{{ r.detail | e }}">
               <span class="arrow">▼</span>
-              <span class="preview">{{ r.summary[:80] | e }}{% if r.summary|length > 80 %}…{% endif %}</span>
+              <span class="preview" style="color:var(--mut);">Expand to read…</span>
             </span>
           </td>
-          <td>
+          <td id="qcell-{{ loop.index }}">
             {% set qs = r.get('questions', []) %}
             {% if qs %}
             <ol style="margin:0;padding-left:16px;font-size:12px;color:var(--mut);">
@@ -235,8 +271,10 @@
           </td>
         </tr>
         <tr class="expand-row" id="exp-{{ loop.index }}">
-          <td colspan="13">
-            <div class="summary-panel" id="panel-{{ loop.index }}">{{ r.summary | e }}</div>
+          <td colspan="14">
+            <div class="summary-panel" id="panel-{{ loop.index }}">
+              <span style="color:var(--mut);font-size:13px;">Click to load summary…</span>
+            </div>
           </td>
         </tr>
         {% endfor %}
@@ -248,6 +286,35 @@
   {% endif %}
   {% endif %}
 
+</div>
+
+<!-- LinkedIn export toolbar (shown when rows are selected) -->
+<div id="export-toolbar">
+  <span id="export-count">0 selected</span>
+  <select id="export-style">
+    <option value="insights">Insights</option>
+    <option value="tips">Tips</option>
+    <option value="thread">Thread</option>
+  </select>
+  <button class="li-export" id="export-btn" onclick="exportToLinkedIn()">Export to LinkedIn</button>
+  <button class="li-clear" onclick="clearSelection()">Clear</button>
+</div>
+
+<!-- LinkedIn post preview modal -->
+<div id="li-modal-backdrop">
+  <div id="li-modal">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <h3>LinkedIn Post Preview</h3>
+      <button onclick="closeLiModal()" style="background:transparent;border:0;color:var(--mut);font-size:24px;cursor:pointer;line-height:1;padding:0 4px;">×</button>
+    </div>
+    <textarea id="li-post-textarea" oninput="updateCharCount()"></textarea>
+    <div id="li-hashtags"></div>
+    <div id="li-charcount"></div>
+    <div class="li-modal-actions">
+      <button class="li-copy" onclick="copyPost()">Copy Post</button>
+      <button class="li-regen" onclick="exportToLinkedIn(true)">Regenerate</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -339,6 +406,77 @@
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   }
 
+  // --- Row selection & LinkedIn export ---
+  let selectedRows = [];
+
+  function updateSelectionState() {
+    selectedRows = [];
+    document.querySelectorAll('.row-item:checked').forEach(cb => {
+      try { selectedRows.push(JSON.parse(cb.dataset.row)); } catch(e) {}
+    });
+    const toolbar = document.getElementById('export-toolbar');
+    document.getElementById('export-count').textContent = selectedRows.length + ' selected';
+    toolbar.classList.toggle('visible', selectedRows.length > 0);
+    document.querySelectorAll('.row-item').forEach(cb => {
+      cb.closest('tr').classList.toggle('row-selected', cb.checked);
+    });
+  }
+
+  document.addEventListener('change', function(e) {
+    if (e.target.id === 'check-all')
+      document.querySelectorAll('.row-item').forEach(cb => cb.checked = e.target.checked);
+    if (e.target.classList.contains('row-check')) updateSelectionState();
+  });
+
+  function clearSelection() {
+    document.querySelectorAll('.row-check').forEach(cb => cb.checked = false);
+    updateSelectionState();
+  }
+
+  function exportToLinkedIn(regen) {
+    if (!selectedRows.length) return;
+    const btn = document.getElementById('export-btn');
+    btn.disabled = true; btn.textContent = 'Generating…';
+    fetch('/dynamo/export-linkedin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ items: selectedRows, style: document.getElementById('export-style').value })
+    })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false; btn.textContent = 'Export to LinkedIn';
+      if (data.error) { alert('Error: ' + data.error); return; }
+      document.getElementById('li-post-textarea').value = data.post_text || '';
+      document.getElementById('li-hashtags').textContent = (data.hashtags || []).join('  ');
+      updateCharCount();
+      document.getElementById('li-modal-backdrop').classList.add('visible');
+    })
+    .catch(err => {
+      btn.disabled = false; btn.textContent = 'Export to LinkedIn';
+      alert('Request failed: ' + err);
+    });
+  }
+
+  function updateCharCount() {
+    const n  = document.getElementById('li-post-textarea').value.length;
+    const el = document.getElementById('li-charcount');
+    el.textContent = n + ' / 3000 chars';
+    el.style.color = n > 3000 ? 'var(--accent)' : 'var(--mut)';
+  }
+
+  function copyPost() {
+    navigator.clipboard.writeText(document.getElementById('li-post-textarea').value)
+      .then(() => {
+        const b = document.querySelector('.li-copy');
+        b.textContent = 'Copied!';
+        setTimeout(() => b.textContent = 'Copy Post', 2000);
+      });
+  }
+
+  function closeLiModal() {
+    document.getElementById('li-modal-backdrop').classList.remove('visible');
+  }
+
   function toggleSummary(toggle) {
     const expRow = document.getElementById(toggle.dataset.id);
     const panel  = document.getElementById(toggle.dataset.id.replace('exp-', 'panel-'));
@@ -347,13 +485,27 @@
       expRow.classList.remove('visible');
       toggle.classList.remove('open');
     } else {
-      if (!panel.dataset.rendered) {
-        panel.innerHTML = mdlite(panel.textContent);
-        panel.dataset.rendered = '1';
-      }
       expRow.classList.add('visible');
       toggle.classList.add('open');
       expRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (!panel.dataset.loaded) {
+        panel.dataset.loaded = '1';
+        const vid = toggle.dataset.videoId;
+        const det = toggle.dataset.detail;
+        fetch(`/dynamo/item/${encodeURIComponent(vid)}/${encodeURIComponent(det)}`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.error) { panel.textContent = 'Error: ' + data.error; return; }
+            panel.innerHTML = mdlite(data.summary || '(no summary)');
+            const idx = toggle.dataset.id.replace('exp-', '');
+            const qCell = document.getElementById('qcell-' + idx);
+            if (qCell && data.questions && data.questions.length) {
+              qCell.innerHTML = '<ol style="margin:0;padding-left:16px;font-size:12px;color:var(--mut);">'
+                + data.questions.map(q => `<li style="margin-bottom:3px;">${q}</li>`).join('') + '</ol>';
+            }
+          })
+          .catch(() => { panel.textContent = 'Failed to load summary.'; });
+      }
     }
   }
 </script>

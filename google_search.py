@@ -56,7 +56,7 @@ _SYSTEM_PROMPT = (
 _DETAIL_SPECS = {
     "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 320, 6000),
     "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 550, 9000),
-    "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, tools/products named, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 1100, 16000),
+    "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, tools/products named, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 2000, 16000),
 }
 
 
@@ -217,7 +217,7 @@ def summarize_article(article: dict, text: str, detail: str = "medium") -> dict:
             model=_MODEL,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
-            max_tokens=max_tokens + 200,
+            max_tokens=max_tokens + 400,
         )
         summary, questions = _split_questions(resp.content[0].text.strip())
     except Exception as e:

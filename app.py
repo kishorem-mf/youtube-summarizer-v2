@@ -274,6 +274,15 @@ def dynamo_explorer():
 
     table = storage._dynamo_table()
 
+    # Projection for all scan queries — excludes `summary` (largest field, lazy-loaded on expand)
+    # `url` is a DynamoDB reserved word so it must be aliased via ExpressionAttributeNames
+    _SCAN_PROJ = (
+        "video_id, detail, title, channel, author, search_term, "
+        "tags, searched_on, source_type, source_platform, "
+        "usage_count, word_count, questions, #url"
+    )
+    _SCAN_NAMES = {"#url": "url"}
+
     try:
         if qt == "get_item":
             if not video_id or not detail:
@@ -290,9 +299,17 @@ def dynamo_explorer():
                 ctx.update(rows=resp.get("Items", []), query_label=f"all details · {video_id}")
 
         elif qt == "scan_recent":
-            resp = table.scan(Limit=limit)
-            items = sorted(resp.get("Items", []), key=lambda x: x.get("searched_on", ""), reverse=True)
-            ctx.update(rows=items, query_label=f"scan · last {limit} items")
+            scan_kwargs = {"ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
+            all_rows = []
+            while True:
+                resp = table.scan(**scan_kwargs)
+                all_rows.extend(resp.get("Items", []))
+                lek = resp.get("LastEvaluatedKey")
+                if not lek:
+                    break
+                scan_kwargs["ExclusiveStartKey"] = lek
+            all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+            ctx.update(rows=all_rows[:limit], query_label=f"scan · last {limit} items")
 
         elif qt == "delete_item":
             if not video_id or not detail:
@@ -310,7 +327,7 @@ def dynamo_explorer():
                 fe = Attr("search_term").eq(search_term)
                 if tag:
                     fe = fe & Attr("tags").contains(tag)
-                scan_kwargs = {"FilterExpression": fe}
+                scan_kwargs = {"FilterExpression": fe, "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -328,7 +345,7 @@ def dynamo_explorer():
             if not tag:
                 ctx.update(message="Tag is required.", message_type="err", rows=[])
             else:
-                scan_kwargs = {"FilterExpression": Attr("tags").contains(tag)}
+                scan_kwargs = {"FilterExpression": Attr("tags").contains(tag), "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -346,7 +363,7 @@ def dynamo_explorer():
             if not platform:
                 ctx.update(message="Platform is required.", message_type="err", rows=[])
             else:
-                scan_kwargs = {"FilterExpression": Attr("source_platform").eq(platform)}
+                scan_kwargs = {"FilterExpression": Attr("source_platform").eq(platform), "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -406,6 +423,112 @@ def dynamo_filters():
                 for t, c in topic_tags.items()
             },
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/dynamo/item/<video_id>/<detail>")
+def dynamo_item_detail(video_id, detail):
+    """Return summary + questions for a single item — used by lazy expand in DB Explorer."""
+    from flask import jsonify
+    item = storage._dynamo_table().get_item(
+        Key={"video_id": video_id, "detail": detail}
+    ).get("Item")
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({
+        "summary":   item.get("summary", ""),
+        "questions": list(item.get("questions", [])),
+    })
+
+
+@app.route("/dynamo/export-linkedin", methods=["POST"])
+def dynamo_export_linkedin():
+    from flask import jsonify
+    import anthropic as _asdk, httpx as _httpx
+
+    data  = request.get_json(force=True) or {}
+    items = data.get("items", [])
+    style = data.get("style", "insights")
+
+    if not items:
+        return jsonify({"error": "No items selected"}), 400
+
+    # Fetch full summary from DynamoDB for each item (summary excluded from scan projection)
+    tbl = storage._dynamo_table()
+    enriched = []
+    for it in items:
+        vid, det = it.get("video_id", ""), it.get("detail", "high")
+        if vid:
+            full = tbl.get_item(Key={"video_id": vid, "detail": det}).get("Item", {})
+            it = dict(it, summary=full.get("summary", ""), tags=list(full.get("tags", [])),
+                      url=full.get("url", it.get("url", "")))
+        enriched.append(it)
+    items = enriched
+
+    digests = []
+    for i, it in enumerate(items, 1):
+        title   = it.get("title", "Untitled")
+        author  = it.get("author") or it.get("channel", "")
+        summary = (it.get("summary") or "")[:400]
+        tags    = ", ".join(it.get("tags", []))
+        url     = it.get("url", "")
+        url_line = f"\nURL: {url}" if url else ""
+        digests.append(f"[{i}] {title}\nAuthor: {author}\nTags: {tags}{url_line}\nSummary: {summary}")
+    digest_block = "\n\n".join(digests)
+
+    style_instructions = {
+        "insights": "Write a 'N things I learned about [topic] this week' post. Use numbered insights.",
+        "tips":     "Write a practical tips post. Each tip is actionable and specific.",
+        "thread":   "Write a LinkedIn thread-style post using 1/ 2/ 3/ numbering.",
+    }.get(style, "Write a LinkedIn post sharing key insights from these articles.")
+
+    prompt = (
+        f"You are a LinkedIn thought-leader writing a post based on {len(items)} articles/videos.\n\n"
+        f"Style: {style_instructions}\n\n"
+        f"Rules:\n"
+        f"- Post body: max 3000 characters, professional but conversational tone\n"
+        f"- End with a thought-provoking question to drive engagement\n"
+        f"- After the post, output exactly this delimiter on its own line: ---HASHTAGS---\n"
+        f"- Then output 5-8 relevant hashtags (no # prefix, one per line)\n\n"
+        f"Articles:\n{digest_block}"
+    )
+
+    _client = _asdk.Anthropic(
+        api_key=os.environ["ANTHROPIC_FOUNDRY_API_KEY"],
+        base_url=os.environ.get("ANTHROPIC_FOUNDRY_ENDPOINT",
+                                "https://nandamagatala-8810-resource.services.ai.azure.com/anthropic/v1"),
+        http_client=_httpx.Client(verify=False),
+    )
+    _model = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-opus-4-8")
+
+    try:
+        resp = _client.messages.create(
+            model=_model,
+            system="You write concise, high-signal LinkedIn posts. Follow the format exactly.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+        )
+        raw = resp.content[0].text.strip()
+        if "---HASHTAGS---" in raw:
+            post_part, tag_part = raw.split("---HASHTAGS---", 1)
+            post_text = post_part.strip()
+            hashtags  = [f"#{t.strip().lstrip('#')}" for t in tag_part.strip().splitlines() if t.strip()]
+        else:
+            post_text = raw
+            hashtags  = []
+
+        # Always append sources section with URLs for every item that has one
+        sources = []
+        for i, it in enumerate(items, 1):
+            url   = it.get("url", "").strip()
+            title = it.get("title", f"Article {i}")
+            if url:
+                sources.append(f"[{i}] {title}\n{url}")
+        if sources:
+            post_text = post_text + "\n\n\U0001f517 Sources:\n" + "\n\n".join(sources)
+
+        return jsonify({"post_text": post_text, "hashtags": hashtags, "char_count": len(post_text)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

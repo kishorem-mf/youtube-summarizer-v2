@@ -495,7 +495,7 @@ DETAIL_SPECS = {
         "all key concepts, examples, numbers, tools/products named, and "
         "actionable takeaways. Group bullets under short bold sub-headings when "
         "the content has distinct themes.",
-        1100, 16000,
+        2000, 16000,
     ),
 }
 DEFAULT_DETAIL = "medium"
@@ -578,7 +578,7 @@ def summarize_video(video, source_text, detail=DEFAULT_DETAIL, word_count=0):
             messages=[
                 {"role": "user", "content": user},
             ],
-            max_tokens=max_tokens + 200,
+            max_tokens=max_tokens + 400,
         )
         return _split_questions(resp.content[0].text.strip())
     except Exception as e:
