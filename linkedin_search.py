@@ -9,6 +9,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import hashlib
 import os
+import re
 
 import httpx as _httpx
 import requests as _req
@@ -94,6 +95,33 @@ def _is_hiring_post(text: str) -> bool:
     return any(kw in lower for kw in _HIRING_KEYWORDS)
 
 
+_EN_STOPWORDS = {
+    "the", "and", "to", "of", "a", "in", "is", "for", "on", "with", "this",
+    "that", "it", "as", "are", "we", "you", "your", "our", "how", "what", "why",
+}
+
+
+def _looks_english(text: str) -> bool:
+    """Best-effort English check, no external deps.
+
+    Rejects text dominated by non-Latin scripts (CJK, Arabic, Cyrillic,
+    Devanagari…) and longer Latin text that lacks common English stopwords
+    (filters Spanish/French/German/etc.). Short/empty text is kept to avoid
+    over-filtering.
+    """
+    if not text:
+        return True
+    letters = [c for c in text if c.isalpha()]
+    if letters:
+        non_latin = sum(1 for c in letters if ord(c) > 0x024F)
+        if non_latin / len(letters) > 0.20:
+            return False
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if len(words) >= 12:
+        return sum(1 for w in words if w in _EN_STOPWORDS) >= 2
+    return True
+
+
 def search_linkedin(query: str, max_results: int = 10, date_filter: str = "") -> list[dict]:
     """Search LinkedIn posts via Apify actor. Returns list of post dicts."""
     if not APIFY_TOKEN:
@@ -153,6 +181,10 @@ def search_linkedin(query: str, max_results: int = 10, date_filter: str = "") ->
         text = _extract(item, "text", "content", "postText", "body")
 
         if _is_hiring_post(text):
+            continue
+
+        # English-only: drop posts with clearly non-English text
+        if not _looks_english(text):
             continue
 
         posts.append({

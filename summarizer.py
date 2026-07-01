@@ -131,6 +131,33 @@ def _yt_api_get(url, params):
     return json.loads(resp.read())
 
 
+_EN_STOPWORDS = {
+    "the", "and", "to", "of", "a", "in", "is", "for", "on", "with", "this",
+    "that", "it", "as", "are", "we", "you", "your", "our", "how", "what", "why",
+}
+
+
+def _looks_english(text: str) -> bool:
+    """Best-effort English check, no external deps.
+
+    Rejects text dominated by non-Latin scripts (CJK, Arabic, Cyrillic,
+    Devanagari…) and longer Latin text that lacks common English stopwords
+    (filters Spanish/French/German/etc.). Short/empty text is kept to avoid
+    over-filtering.
+    """
+    if not text:
+        return True
+    letters = [c for c in text if c.isalpha()]
+    if letters:
+        non_latin = sum(1 for c in letters if ord(c) > 0x024F)
+        if non_latin / len(letters) > 0.20:
+            return False
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if len(words) >= 12:
+        return sum(1 for w in words if w in _EN_STOPWORDS) >= 2
+    return True
+
+
 def _search_yt_api(keyword, max_results=6, date_filter=None, sort_order="relevance"):
     """Search via YouTube Data API v3 — returns full metadata including dates."""
     params = {
@@ -140,6 +167,7 @@ def _search_yt_api(keyword, max_results=6, date_filter=None, sort_order="relevan
         "maxResults": min(max_results, 50),
         "order": _SORT_MAP.get(sort_order, "relevance"),
         "videoDuration": "medium",   # excludes Shorts (<4 min) and very long (>20 min) — use 'any' for all
+        "relevanceLanguage": "en",   # bias results toward English-language videos
         "key": _YT_API_KEY,
     }
     # Add date filter if specified
@@ -260,6 +288,9 @@ def _search_ytdlp(keyword, max_results=6, date_filter=None, sort_order="relevanc
             continue
         dur_s = data.get("duration") or 0
         if 0 < dur_s < 61:
+            continue
+        # English-only: drop videos with clearly non-English titles
+        if not _looks_english(data.get("title") or ""):
             continue
         ts = data.get("timestamp") or data.get("release_timestamp")
         if cutoff:
