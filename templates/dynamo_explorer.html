@@ -93,6 +93,7 @@
             <option value="delete_item"  {% if query_type=='delete_item'  %}selected{% endif %}>Q4 — Delete cache entry</option>
             <option value="by_topic"     {% if query_type=='by_topic'     %}selected{% endif %}>Q5 — Search by Topic (search_term)</option>
             <option value="by_tag"       {% if query_type=='by_tag'       %}selected{% endif %}>Q6 — Search by Tag</option>
+            <option value="by_platform"  {% if query_type=='by_platform'  %}selected{% endif %}>Q7 — Filter by Platform</option>
           </select>
         </div>
       </div>
@@ -120,6 +121,12 @@
         <div class="field" id="f_tag">
           <label>Tag <span style="color:var(--mut);text-transform:none;letter-spacing:0;">(subtopic)</span></label>
           <select name="tag" id="tag_select" style="min-width:180px;">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div class="field" id="f_platform">
+          <label>Platform</label>
+          <select name="platform" id="platform_select" style="min-width:180px;">
             <option value="">Loading…</option>
           </select>
         </div>
@@ -151,27 +158,47 @@
     <table>
       <thead>
         <tr>
-          <th>Video ID</th>
+          <th>ID</th>
+          <th>Platform</th>
           <th>Detail</th>
           <th>Title</th>
-          <th>Channel</th>
+          <th>Channel / Author</th>
           <th>Search Term</th>
           <th>Tags</th>
           <th>Searched On</th>
           <th>Source Type</th>
           <th>Usage</th>
           <th>Words</th>
-          <th>Language</th>
           <th>Summary</th>
+          <th>Questions</th>
         </tr>
       </thead>
       <tbody>
         {% for r in rows %}
         <tr>
-          <td><a href="https://www.youtube.com/watch?v={{ r.video_id }}" target="_blank" style="color:var(--accent);text-decoration:none;">{{ r.video_id }}</a></td>
+          <td>
+            {% if r.get('url') %}
+            <a href="{{ r.url }}" target="_blank" style="color:var(--accent);text-decoration:none;" title="{{ r.video_id }}">{{ r.video_id[:14] }}</a>
+            {% else %}
+            {{ r.video_id[:14] }}
+            {% endif %}
+          </td>
+          <td>
+            {% set sp = r.get('source_platform') %}
+            {% if not sp %}
+              {% set _url = r.get('url', '') | lower %}
+              {% if 'linkedin.com' in _url %}{% set sp = 'linkedin_post' %}
+              {% elif 'youtube.com' in _url or 'youtu.be' in _url %}{% set sp = 'youtube' %}
+              {% else %}{% set sp = 'google_search' %}{% endif %}
+            {% endif %}
+            {% if sp == 'youtube' %}<span class="tag" style="background:#1a1a2e;color:#a78bfa;">▶ yt</span>
+            {% elif sp == 'google_search' %}<span class="tag" style="background:#1a2a1e;color:#34d399;">G</span>
+            {% elif sp == 'linkedin_post' %}<span class="tag" style="background:#1a1e2e;color:#60a5fa;">in</span>
+            {% else %}<span class="tag tag-cache">{{ sp }}</span>{% endif %}
+          </td>
           <td>{{ r.detail }}</td>
           <td class="cell-long" title="{{ r.title }}">{{ r.title }}</td>
-          <td>{{ r.channel }}</td>
+          <td>{{ r.get('author') or r.channel }}</td>
           <td>{{ r.get('search_term', '') }}</td>
           <td>
             {% for tag in r.get('tags', []) %}
@@ -190,16 +217,25 @@
           </td>
           <td>{{ r.usage_count }}</td>
           <td>{{ r.word_count }}</td>
-          <td>{{ r.language }}</td>
           <td>
             <span class="summary-toggle" onclick="toggleSummary(this)" data-id="exp-{{ loop.index }}">
               <span class="arrow">▼</span>
               <span class="preview">{{ r.summary[:80] | e }}{% if r.summary|length > 80 %}…{% endif %}</span>
             </span>
           </td>
+          <td>
+            {% set qs = r.get('questions', []) %}
+            {% if qs %}
+            <ol style="margin:0;padding-left:16px;font-size:12px;color:var(--mut);">
+              {% for q in qs %}<li style="margin-bottom:3px;">{{ q }}</li>{% endfor %}
+            </ol>
+            {% else %}
+            <span style="color:var(--line);font-size:12px;">—</span>
+            {% endif %}
+          </td>
         </tr>
         <tr class="expand-row" id="exp-{{ loop.index }}">
-          <td colspan="12">
+          <td colspan="13">
             <div class="summary-panel" id="panel-{{ loop.index }}">{{ r.summary | e }}</div>
           </td>
         </tr>
@@ -222,11 +258,12 @@
     delete_item: ['f_video_id', 'f_detail'],
     by_topic:    ['f_search_term', 'f_tag', 'f_limit'],
     by_tag:      ['f_tag', 'f_limit'],
+    by_platform: ['f_platform', 'f_limit'],
   };
   function updateFields() {
     const qt = document.getElementById('query_type').value;
     const show = FIELDS[qt] || [];
-    ['f_video_id','f_detail','f_search_term','f_tag','f_limit'].forEach(id => {
+    ['f_video_id','f_detail','f_search_term','f_tag','f_platform','f_limit'].forEach(id => {
       document.getElementById(id).style.display = show.includes(id) ? '' : 'none';
     });
   }
@@ -248,8 +285,9 @@
   }
 
   (function loadFilters() {
-    const savedTerm = "{{ search_term | e }}";
-    const savedTag  = "{{ tag | e }}";
+    const savedTerm     = "{{ search_term | e }}";
+    const savedTag      = "{{ tag | e }}";
+    const savedPlatform = "{{ platform | e }}";
     fetch('/dynamo/filters')
       .then(r => r.json())
       .then(data => {
@@ -270,10 +308,21 @@
         const initialTags = savedTerm && topicTagsMap[savedTerm]
           ? topicTagsMap[savedTerm] : allTags;
         populateTagDropdown(initialTags, savedTag);
+
+        // Populate platform dropdown
+        const platformSel = document.getElementById('platform_select');
+        platformSel.innerHTML = '<option value="">— all platforms —</option>';
+        (data.source_platforms || []).forEach(p => {
+          const o = document.createElement('option');
+          o.value = p; o.textContent = p;
+          if (p === savedPlatform) o.selected = true;
+          platformSel.appendChild(o);
+        });
       })
       .catch(() => {
         document.getElementById('search_term_select').innerHTML = '<option value="">Error loading topics</option>';
         document.getElementById('tag_select').innerHTML = '<option value="">Error loading tags</option>';
+        document.getElementById('platform_select').innerHTML = '<option value="">Error loading platforms</option>';
       });
   })();
 

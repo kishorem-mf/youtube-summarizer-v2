@@ -410,16 +410,18 @@ def fetch_and_summarize(video, detail=DEFAULT_DETAIL):
             msg += " Add APIFY_API_KEY to .env to enable Apify fallback."
         return {"transcript": "", "summary": "", "source": "", "wordCount": 0, "language": "", "error": msg}
 
-    summary = summarize_video(video, text, detail=detail)
+    word_count = len(text.split())
+    summary, questions = summarize_video(video, text, detail=detail, word_count=word_count)
     tags = _generate_tags(summary)
     return {
         "transcript": text,
-        "summary": summary,
-        "tags": tags,
-        "source": source,
-        "wordCount": len(text.split()),
-        "language": lang,
-        "error": "",
+        "summary":    summary,
+        "tags":       tags,
+        "questions":  questions,
+        "source":     source,
+        "wordCount":  word_count,
+        "language":   lang,
+        "error":      "",
     }
 
 
@@ -523,18 +525,51 @@ def _generate_tags(summary):
         return []
 
 
-def summarize_video(video, source_text, detail=DEFAULT_DETAIL):
+def _n_questions(word_count):
+    if word_count < 100:
+        return 2
+    if word_count < 400:
+        return 3
+    return 5
+
+
+def _split_questions(raw):
+    """Split LLM response on ---QUESTIONS--- delimiter. Returns (summary_str, questions_list)."""
+    if "---QUESTIONS---" not in raw:
+        return raw.strip(), []
+    summary_part, q_part = raw.split("---QUESTIONS---", 1)
+    questions = []
+    for line in q_part.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line[0].isdigit():
+            line = line.split(".", 1)[-1].strip()
+        if line:
+            questions.append(line)
+    return summary_part.strip(), questions[:5]
+
+
+def summarize_video(video, source_text, detail=DEFAULT_DETAIL, word_count=0):
     source_text = (source_text or "").strip()
     if len(source_text) < 40:
-        return "_Not enough text available to summarize (no description/transcript)._"
+        return "_Not enough text available to summarize (no description/transcript)._", []
     instruction, max_tokens, char_limit = _detail_spec(detail)
     source_text = source_text[:char_limit]
+    n = _n_questions(word_count)
+    q_suffix = (
+        f"\n\n---QUESTIONS---\n"
+        f"Generate exactly {n} questions this content directly answers. "
+        f"Write specific questions a researcher would search for. "
+        f"Number them 1-{n}. Output only the questions, no preamble."
+    )
     user = (
         f"Title: {video['title']}\n"
         f"Channel: {video['channel']}\n"
         f"Views: {video['views']:,} | Published: {video['date']} | Duration: {video['duration']}\n\n"
         f"{instruction}\n\n"
         f"Material:\n{source_text}"
+        f"{q_suffix}"
     )
     try:
         resp = _anthropic.messages.create(
@@ -543,11 +578,11 @@ def summarize_video(video, source_text, detail=DEFAULT_DETAIL):
             messages=[
                 {"role": "user", "content": user},
             ],
-            max_tokens=max_tokens,
+            max_tokens=max_tokens + 200,
         )
-        return resp.content[0].text.strip()
+        return _split_questions(resp.content[0].text.strip())
     except Exception as e:
-        return f"_Summary failed: {e}_"
+        return f"_Summary failed: {e}_", []
 
 
 # --------------------------------------------------------------------------- #

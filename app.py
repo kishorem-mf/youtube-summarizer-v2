@@ -31,6 +31,10 @@ import storage     # noqa: E402
 app = Flask(__name__)
 DEFAULT_MAX = int(os.environ.get("DEFAULT_MAX_RESULTS", "6"))
 
+# In-process cache for LinkedIn posts (keyed by post id) so full text
+# survives the redirect to the post detail page without URL-encoding it.
+_li_post_cache: dict = {}
+
 # Upload-date windows offered in the UI -> yt-dlp dateFilter values.
 DATE_WINDOWS = [
     ("", "Any time"),
@@ -49,7 +53,7 @@ DETAIL_OPTIONS = [
     ("medium", "Medium"),
     ("high", "High"),
 ]
-DEFAULT_DATE_FILTER = "month"
+DEFAULT_DATE_FILTER = "week"
 DEFAULT_SORT = "relevance"
 DEFAULT_DETAIL = "high"
 OUTPUTS = os.path.join(os.path.dirname(__file__), "outputs")
@@ -79,6 +83,8 @@ def index():
         date_filter=DEFAULT_DATE_FILTER,
         sort_order=DEFAULT_SORT,
         detail=DEFAULT_DETAIL,
+        search_mode="youtube",
+        custom="",
         results=None,
         transcript_result=None,
     )
@@ -139,6 +145,8 @@ def run():
         date_filter=date_filter,
         sort_order=sort_order,
         detail=detail,
+        search_mode="youtube",
+        custom="",
         window_label=window_label,
         results=results,
         errors=errors,
@@ -176,7 +184,9 @@ def video_summary():
     if not result.get("error"):
         result["search_term"] = data.get("search_term", "")
         threading.Thread(
-            target=storage.save_result, args=(video, detail, result), daemon=True
+            target=storage.save_result, args=(video, detail, result),
+            kwargs={"source_platform": "youtube", "content_type": "video"},
+            daemon=True,
         ).start()
     return jsonify(result)
 
@@ -232,6 +242,8 @@ def transcript():
         date_filter=DEFAULT_DATE_FILTER,
         sort_order=DEFAULT_SORT,
         detail=detail,
+        search_mode="youtube",
+        custom="",
         results=None,
         transcript_result=tr,
     )
@@ -243,7 +255,7 @@ def dynamo_explorer():
     from boto3.dynamodb.conditions import Key as DKey
 
     ctx = dict(rows=None, query_type="get_item", video_id="", detail="",
-               limit="20", search_term="", tag="",
+               limit="20", search_term="", tag="", platform="",
                query_label="", message=None, message_type=None)
 
     if request.method == "GET":
@@ -255,9 +267,10 @@ def dynamo_explorer():
     detail      = request.form.get("detail", "").strip()
     search_term = request.form.get("search_term", "").strip()
     tag         = request.form.get("tag", "").strip()
+    platform    = request.form.get("platform", "").strip()
     limit       = max(1, min(100, int(request.form.get("limit", "20") or "20")))
     ctx.update(query_type=qt, video_id=video_id, detail=detail,
-               search_term=search_term, tag=tag, limit=str(limit))
+               search_term=search_term, tag=tag, platform=platform, limit=str(limit))
 
     table = storage._dynamo_table()
 
@@ -290,26 +303,61 @@ def dynamo_explorer():
                            query_label=f"delete · {video_id} / {detail}")
 
         elif qt == "by_topic":
-            from boto3.dynamodb.conditions import Key as DKey, Attr
+            from boto3.dynamodb.conditions import Attr
             if not search_term:
                 ctx.update(message="Topic (search_term) is required.", message_type="err", rows=[])
             else:
-                kce = DKey("search_term").eq(search_term)
-                kwargs = dict(IndexName="search_term-index",
-                              KeyConditionExpression=kce, Limit=limit)
+                fe = Attr("search_term").eq(search_term)
                 if tag:
-                    kwargs["FilterExpression"] = Attr("tags").contains(tag)
-                resp  = table.query(**kwargs)
+                    fe = fe & Attr("tags").contains(tag)
+                scan_kwargs = {"FilterExpression": fe}
+                all_rows = []
+                while True:
+                    resp = table.scan(**scan_kwargs)
+                    all_rows.extend(resp.get("Items", []))
+                    lek = resp.get("LastEvaluatedKey")
+                    if not lek:
+                        break
+                    scan_kwargs["ExclusiveStartKey"] = lek
+                all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
                 label = f"topic · {search_term}" + (f" + tag · {tag}" if tag else "")
-                ctx.update(rows=resp.get("Items", []), query_label=label)
+                ctx.update(rows=all_rows[:limit], query_label=label)
 
         elif qt == "by_tag":
             from boto3.dynamodb.conditions import Attr
             if not tag:
                 ctx.update(message="Tag is required.", message_type="err", rows=[])
             else:
-                resp  = table.scan(FilterExpression=Attr("tags").contains(tag), Limit=limit)
-                ctx.update(rows=resp.get("Items", []), query_label=f"tag · {tag}")
+                scan_kwargs = {"FilterExpression": Attr("tags").contains(tag)}
+                all_rows = []
+                while True:
+                    resp = table.scan(**scan_kwargs)
+                    all_rows.extend(resp.get("Items", []))
+                    lek = resp.get("LastEvaluatedKey")
+                    if not lek:
+                        break
+                    scan_kwargs["ExclusiveStartKey"] = lek
+                all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+                ctx.update(rows=all_rows[:limit], query_label=f"tag · {tag}")
+
+        elif qt == "by_platform":
+            from boto3.dynamodb.conditions import Attr
+            platform = request.form.get("platform", "").strip()
+            if not platform:
+                ctx.update(message="Platform is required.", message_type="err", rows=[])
+            else:
+                scan_kwargs = {"FilterExpression": Attr("source_platform").eq(platform)}
+                all_rows = []
+                while True:
+                    resp = table.scan(**scan_kwargs)
+                    all_rows.extend(resp.get("Items", []))
+                    lek = resp.get("LastEvaluatedKey")
+                    if not lek:
+                        break
+                    scan_kwargs["ExclusiveStartKey"] = lek
+                all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+                ctx.update(rows=all_rows[:limit],
+                           query_label=f"platform · {platform}")
 
     except Exception as e:
         ctx.update(rows=[], message=f"DynamoDB error: {e}", message_type="err")
@@ -325,10 +373,11 @@ def dynamo_filters():
     table = storage._dynamo_table()
     try:
         from collections import Counter
-        topic_tags = {}  # {search_term: Counter of tags}
+        topic_tags       = {}   # {search_term: Counter of tags}
+        source_platforms = set()
         last = None
         while True:
-            kwargs = {"ProjectionExpression": "search_term, tags"}
+            kwargs = {"ProjectionExpression": "search_term, tags, source_platform"}
             if last:
                 kwargs["ExclusiveStartKey"] = last
             resp = table.scan(**kwargs)
@@ -338,6 +387,9 @@ def dynamo_filters():
                     if t not in topic_tags:
                         topic_tags[t] = Counter()
                     topic_tags[t].update(item.get("tags", []))
+                sp = (item.get("source_platform") or "").strip()
+                if sp:
+                    source_platforms.add(sp)
             last = resp.get("LastEvaluatedKey")
             if not last:
                 break
@@ -346,9 +398,9 @@ def dynamo_filters():
             key=str.lower
         )
         return jsonify({
-            "search_terms": sorted(topic_tags.keys(), key=str.lower),
-            "tags":         all_tags,
-            # Tags sorted by frequency desc, ties broken alphabetically
+            "search_terms":     sorted(topic_tags.keys(), key=str.lower),
+            "tags":             all_tags,
+            "source_platforms": sorted(source_platforms, key=str.lower),
             "topic_tags": {
                 t: [tag for tag, _ in sorted(c.items(), key=lambda x: (-x[1], x[0].lower()))]
                 for t, c in topic_tags.items()
@@ -686,6 +738,344 @@ def mixer_download():
     mime = "application/pdf" if file_type == "pdf" else "text/plain"
     return send_file(matches[0], mimetype=mime, as_attachment=True,
                      download_name=os.path.basename(matches[0]))
+
+
+@app.route("/google", methods=["GET"])
+def google_search_page():
+    return render_template(
+        "google_search.html",
+        active_tab="google",
+        groups=search_terms.get_groups(),
+        default_max=DEFAULT_MAX,
+        date_windows=DATE_WINDOWS,
+        detail_options=DETAIL_OPTIONS,
+        date_filter=DEFAULT_DATE_FILTER,
+        detail=DEFAULT_DETAIL,
+        results=None,
+        errors={},
+        error=None,
+        custom="",
+        selected=[],
+    )
+
+
+@app.route("/google/run", methods=["POST"])
+def google_run():
+    import google_search as gs
+
+    selected = request.form.getlist("terms")
+    custom   = (request.form.get("custom") or "").strip()
+    if custom:
+        selected = selected + [t.strip() for t in custom.split(",") if t.strip()]
+    if not selected:
+        selected = search_terms.all_terms()
+
+    try:
+        max_results = max(1, min(15, int(request.form.get("max_results", DEFAULT_MAX))))
+    except ValueError:
+        max_results = DEFAULT_MAX
+
+    valid_dates = {v for v, _ in DATE_WINDOWS}
+    date_filter = request.form.get("date_filter", DEFAULT_DATE_FILTER)
+    if date_filter not in valid_dates:
+        date_filter = DEFAULT_DATE_FILTER
+
+    valid_details = {v for v, _ in DETAIL_OPTIONS}
+    detail = request.form.get("detail", DEFAULT_DETAIL)
+    if detail not in valid_details:
+        detail = DEFAULT_DETAIL
+
+    term_pairs = [(label, search_terms.build_query(label)) for label in selected]
+
+    error = None
+    results, errors = gs.run_topics(term_pairs, max_results=max_results,
+                                    date_filter=date_filter)
+
+    return render_template(
+        "google_search.html",
+        active_tab="google",
+        groups=search_terms.get_groups(),
+        default_max=max_results,
+        date_windows=DATE_WINDOWS,
+        detail_options=DETAIL_OPTIONS,
+        date_filter=date_filter,
+        detail=detail,
+        results=results,
+        errors=errors,
+        error=error,
+        custom=custom,
+        selected=selected,
+    )
+
+
+@app.route("/google/summary", methods=["POST"])
+def google_summary():
+    from flask import jsonify
+    import google_search as gs
+
+    data   = request.get_json(force=True) or {}
+    url    = data.get("url", "").strip()
+    detail = data.get("detail", DEFAULT_DETAIL).strip()
+
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+
+    article = {
+        "id":          gs._content_id(url),
+        "url":         url,
+        "title":       data.get("title", ""),
+        "domain":      data.get("domain", ""),
+        "date":        data.get("date", ""),
+        "description": data.get("description", ""),
+        "search_term": data.get("search_term", ""),
+    }
+
+    cached = storage.check_cache(article["id"], detail)
+    if cached:
+        return jsonify(cached)
+
+    result = gs.fetch_and_summarize(article, detail=detail)
+
+    if not result.get("error"):
+        video_meta = {
+            "id":       article["id"],
+            "title":    article["title"],
+            "channel":  article["domain"],
+            "domain":   article["domain"],
+            "author":   article.get("author", ""),
+            "views":    0,
+            "date":     article["date"],
+            "duration": "",
+            "url":      url,
+        }
+        threading.Thread(
+            target=storage.save_result,
+            args=(video_meta, detail, {**result, "search_term": article["search_term"]}),
+            kwargs={"source_platform": "google_search", "content_type": "article"},
+            daemon=True,
+        ).start()
+
+    return jsonify(result)
+
+
+@app.route("/google/article", methods=["GET"])
+def google_article_page():
+    article = {
+        "url":         request.args.get("url", ""),
+        "title":       request.args.get("title", ""),
+        "domain":      request.args.get("domain", ""),
+        "date":        request.args.get("date", ""),
+        "description": request.args.get("description", ""),
+        "search_term": request.args.get("search_term", ""),
+    }
+    return render_template(
+        "google_article.html",
+        article=article,
+        detail_options=DETAIL_OPTIONS,
+        default_detail=DEFAULT_DETAIL,
+    )
+
+
+@app.route("/li-search", methods=["GET"])
+def li_search_page():
+    return render_template(
+        "index.html",
+        active_tab="search",
+        groups=search_terms.get_groups(),
+        default_max=DEFAULT_MAX,
+        date_windows=DATE_WINDOWS,
+        sort_options=SORT_OPTIONS,
+        detail_options=DETAIL_OPTIONS,
+        date_filter=DEFAULT_DATE_FILTER,
+        sort_order=DEFAULT_SORT,
+        detail=DEFAULT_DETAIL,
+        search_mode="linkedin",
+        custom="",
+        results=None,
+        errors={},
+        selected=[],
+        transcript_result=None,
+        today="", total_videos=0, window_label="",
+    )
+
+
+@app.route("/li-search/run", methods=["POST"])
+def li_search_run():
+    import linkedin_search as ls
+
+    selected = request.form.getlist("terms")
+    custom   = (request.form.get("custom") or "").strip()
+    if custom:
+        selected = selected + [t.strip() for t in custom.split(",") if t.strip()]
+    if not selected:
+        selected = search_terms.all_terms()
+
+    try:
+        max_results = max(1, min(50, int(request.form.get("max_results", DEFAULT_MAX))))
+    except ValueError:
+        max_results = DEFAULT_MAX
+
+    valid_dates = {v for v, _ in DATE_WINDOWS}
+    date_filter = request.form.get("date_filter", DEFAULT_DATE_FILTER)
+    if date_filter not in valid_dates:
+        date_filter = DEFAULT_DATE_FILTER
+
+    valid_details = {v for v, _ in DETAIL_OPTIONS}
+    detail = request.form.get("detail", DEFAULT_DETAIL)
+    if detail not in valid_details:
+        detail = DEFAULT_DETAIL
+
+    term_pairs = [(label, search_terms.build_query(label)) for label in selected]
+
+    results, errors = ls.run_topics(term_pairs, max_results=max_results,
+                                    date_filter=date_filter)
+
+    # Cache posts so the post detail page can retrieve full text by id
+    for term_data in results.values():
+        for p in term_data.get("results", []):
+            _li_post_cache[p["id"]] = p
+
+    return render_template(
+        "index.html",
+        active_tab="search",
+        groups=search_terms.get_groups(),
+        default_max=max_results,
+        date_windows=DATE_WINDOWS,
+        sort_options=SORT_OPTIONS,
+        detail_options=DETAIL_OPTIONS,
+        date_filter=date_filter,
+        sort_order=DEFAULT_SORT,
+        detail=detail,
+        search_mode="linkedin",
+        custom=custom,
+        results=results,
+        errors=errors,
+        selected=selected,
+        transcript_result=None,
+        today="", total_videos=0, window_label="",
+    )
+
+
+@app.route("/li-search/summary", methods=["POST"])
+def li_search_summary():
+    from flask import jsonify
+    import linkedin_search as ls
+
+    data   = request.get_json(force=True) or {}
+    url    = data.get("url", "").strip()
+    detail = data.get("detail", DEFAULT_DETAIL).strip()
+
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+
+    post_id  = ls._post_id(url)
+    cached_p = _li_post_cache.get(post_id) or {}
+    post = {
+        "id":          post_id,
+        "url":         url,
+        "text":        data.get("text", "") or cached_p.get("text", ""),
+        "author":      data.get("author", ""),
+        "headline":    data.get("headline", ""),
+        "date":        data.get("date", ""),
+        "likes":       data.get("likes", 0),
+        "comments":    data.get("comments", 0),
+        "search_term": data.get("search_term", ""),
+    }
+
+    cached = storage.check_cache(post["id"], detail)
+    if cached:
+        return jsonify(cached)
+
+    result = ls.summarize_post(post, detail=detail)
+
+    if not result.get("error"):
+        video_meta = {
+            "id":       post["id"],
+            "title":    f"LinkedIn: {post['author']}",
+            "channel":  post["author"],
+            "author":   post["author"],
+            "headline": post.get("headline", ""),
+            "views":    post["likes"],
+            "date":     post["date"],
+            "duration": "",
+            "url":      url,
+        }
+        threading.Thread(
+            target=storage.save_result,
+            args=(video_meta, detail, {**result, "search_term": post["search_term"]}),
+            kwargs={"source_platform": "linkedin_post", "content_type": "post"},
+            daemon=True,
+        ).start()
+
+    return jsonify(result)
+
+
+@app.route("/li-search/post", methods=["GET"])
+def li_search_post_page():
+    import linkedin_search as ls
+    post_id = request.args.get("id", "")
+    post    = _li_post_cache.get(post_id) or {
+        "id":          post_id,
+        "url":         request.args.get("url", ""),
+        "author":      request.args.get("author", ""),
+        "headline":    request.args.get("headline", ""),
+        "profileUrl":  request.args.get("profileUrl", ""),
+        "date":        request.args.get("date", ""),
+        "likes":       request.args.get("likes", 0),
+        "comments":    request.args.get("comments", 0),
+        "text":        "",
+        "search_term": request.args.get("search_term", ""),
+    }
+    return render_template(
+        "linkedin_post_page.html",
+        post=post,
+        detail_options=DETAIL_OPTIONS,
+        default_detail=DEFAULT_DETAIL,
+    )
+
+
+# ─── Graph Explorer ──────────────────────────────────────────────────────────
+
+@app.route("/graph")
+def graph_page():
+    import graph_data as gd
+    meta = gd.get_meta()
+    return render_template("dynamo_graph_v2.html", active_tab="graph", meta=meta)
+
+
+@app.route("/graph/data")
+def graph_data_api():
+    from flask import jsonify
+    import graph_data as gd
+    platform    = request.args.get("platform") or None
+    search_term = request.args.get("search_term") or None
+    tag         = request.args.get("tag") or None
+    graph = gd.build_graph(platform=platform, search_term=search_term, tag=tag)
+    return jsonify(graph)
+
+
+@app.route("/graph/meta")
+def graph_meta_api():
+    from flask import jsonify
+    import graph_data as gd
+    return jsonify(gd.get_meta())
+
+
+@app.route("/graph/node/<video_id>")
+def graph_node_api(video_id):
+    from flask import jsonify
+    import graph_data as gd
+    items = gd.scan_all_items()
+    detail_rank = {"high": 3, "medium": 2, "low": 1}
+    best = None
+    for item in items:
+        if item.get("video_id") == video_id:
+            if best is None or detail_rank.get(item.get("detail", ""), 0) > detail_rank.get(best.get("detail", ""), 0):
+                best = item
+    if not best:
+        return jsonify({"error": "not found"}), 404
+    best.pop("transcript", None)
+    return jsonify(best)
 
 
 if __name__ == "__main__":

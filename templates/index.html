@@ -64,13 +64,37 @@
     .summary-label { font-size: 12px; color: var(--mut); margin: 8px 0 4px; }
     .badge-apify { background: #2a2f3a; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 11px; }
     .mut { color: var(--mut); font-size: 13px; }
+    /* Source toggle */
+    .source-toggle-row { display:flex; align-items:center; gap:20px; margin-bottom:16px; padding-bottom:16px; border-bottom:1px solid var(--line); }
+    .src-label { font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+    .src-opt { display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer; user-select:none; }
+    .src-opt input[type=checkbox] { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; flex-shrink:0; }
+    /* LinkedIn cards */
+    .li-avatar { width:32px; height:32px; border-radius:50%; background:#0a66c2; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; color:#fff; flex-shrink:0; }
+    .li-author-name { font-size:13px; font-weight:600; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .li-author-headline { font-size:11px; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .li-text { font-size:13px; color:var(--fg); line-height:1.5; display:-webkit-box; -webkit-line-clamp:5; -webkit-box-orient:vertical; overflow:hidden; margin-bottom:10px; }
+    .li-meta { display:flex; gap:12px; font-size:12px; color:var(--mut); margin-bottom:10px; }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
 <div class="wrap">
-  <form class="controls" method="post" action="/run">
+  <form class="controls" method="post" action="{{ '/li-search/run' if search_mode == 'linkedin' else '/run' }}" id="main-form">
+
+    <div class="source-toggle-row">
+      <span class="src-label">Source</span>
+      <label class="src-opt">
+        <input type="checkbox" id="src-yt" onchange="onSrcChange('yt')" {% if search_mode != 'linkedin' %}checked{% endif %}>
+        ▶ YouTube
+      </label>
+      <label class="src-opt">
+        <input type="checkbox" id="src-li" onchange="onSrcChange('li')" {% if search_mode == 'linkedin' %}checked{% endif %}>
+        in LinkedIn Posts
+      </label>
+    </div>
+
     <div class="groups">
       {% for gname, terms in groups.items() %}
       {% set gid = gname | replace(' ','_') | replace('/','_') %}
@@ -98,14 +122,15 @@
     </div>
 
     <div class="row">
-      <label>Uploaded
+      <label>
+        <span id="date-label">{% if search_mode == 'linkedin' %}Posted{% else %}Uploaded{% endif %}</span>
         <select name="date_filter">
           {% for val, lbl in date_windows %}
           <option value="{{ val }}" {% if val == date_filter %}selected{% endif %}>{{ lbl }}</option>
           {% endfor %}
         </select>
       </label>
-      <label>Sort by
+      <label id="sort-wrap" {% if search_mode == 'linkedin' %}style="display:none"{% endif %}>Sort by
         <select name="sort_order">
           {% for val, lbl in sort_options %}
           <option value="{{ val }}" {% if val == sort_order %}selected{% endif %}>{{ lbl }}</option>
@@ -119,18 +144,25 @@
           {% endfor %}
         </select>
       </label>
-      <label>Videos / term
-        <input type="number" name="max_results" min="1" max="15" value="{{ default_max }}">
+      <label>
+        <span id="max-label">{% if search_mode == 'linkedin' %}Posts{% else %}Videos{% endif %} / term</span>
+        <input type="number" name="max_results" id="max-input" min="1" max="{{ 50 if search_mode == 'linkedin' else 15 }}" value="{{ default_max }}">
       </label>
-      <label>Custom terms (comma-sep)
-        <input type="text" name="custom" placeholder="e.g. apache flink, vector database">
+      <label>Custom topics
+        <input type="text" name="custom" placeholder="comma-separated" value="{{ custom or '' }}">
       </label>
-      <button type="submit">Run summary</button>
+      <button type="submit" id="run-btn">{% if search_mode == 'linkedin' %}Search LinkedIn{% else %}Run summary{% endif %}</button>
     </div>
-    <div class="hint">No boxes ticked = run <strong>all</strong> terms. Click <strong>Get Summary</strong> on any card to fetch its transcript and generate a summary on demand — saving API credits for videos you actually care about. <strong>Detail</strong> controls how many key points the summary has.</div>
+    <div class="hint" id="run-hint">
+      {% if search_mode == 'linkedin' %}
+      Results via Apify · apimaestro/linkedin-posts-search-scraper-no-cookies
+      {% else %}
+      No boxes ticked = run <strong>all</strong> terms. Click <strong>Get Summary</strong> on any card to fetch its transcript on demand. <strong>Detail</strong> controls summary depth.
+      {% endif %}
+    </div>
   </form>
 
-  <form class="controls adhoc" method="post" action="/transcript">
+  <form class="controls adhoc" method="post" action="/transcript" id="adhoc-form" {% if search_mode == 'linkedin' %}style="display:none"{% endif %}>
     <h3 class="adhoc-title">🎯 Ad-hoc research — single video transcript</h3>
     <div class="row" style="border-top:none; padding-top:0; margin-top:0;">
       <label style="flex:1; min-width:320px;">YouTube URL
@@ -177,7 +209,7 @@
     {% endif %}
   {% endif %}
 
-  {% if results is not none %}
+  {% if results is not none and search_mode != 'linkedin' %}
     <div class="meta">
       Digest for <strong>{{ today }}</strong> · {{ total_videos }} unique videos ·
       Uploaded: <strong>{{ window_label }}</strong> · sorted by {{ sort_order }} ·
@@ -212,9 +244,86 @@
     </div>
     {% endfor %}
   {% endif %}
+
+  {% if results is not none and search_mode == 'linkedin' %}
+    {% if errors %}
+      {% for term, e in errors.items() %}
+        <div class="err">⚠ {{ term }}: {{ e }}</div>
+      {% endfor %}
+    {% endif %}
+
+    {% for term, data in results.items() %}
+    <div class="term-block">
+      <div class="term-head">
+        <h2>{{ term }}</h2>
+        <span style="font-size:12px;color:var(--mut);">{{ data.results | length }} post{{ 's' if data.results | length != 1 }}</span>
+        {% if errors and errors.get(term) %}
+        <span class="err" style="font-size:13px;">{{ errors[term] }}</span>
+        {% endif %}
+      </div>
+      {% if data.results %}
+      <div class="cards" style="margin-top:14px;">
+        {% for p in data.results %}
+        <div class="card" style="padding:14px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <div class="li-avatar">{{ (p.author or '?')[0] | upper }}</div>
+            <div style="overflow:hidden;min-width:0;">
+              <div class="li-author-name">
+                {% if p.profileUrl %}
+                  <a href="{{ p.profileUrl }}" target="_blank" rel="noopener" style="color:var(--fg);text-decoration:none;">{{ p.author or 'Unknown' }}</a>
+                {% else %}{{ p.author or 'Unknown' }}{% endif %}
+              </div>
+              {% if p.headline %}<div class="li-author-headline">{{ p.headline }}</div>{% endif %}
+            </div>
+          </div>
+          {% if p.date %}<div style="font-size:11px;color:var(--mut);margin-bottom:6px;">{{ p.date }}</div>{% endif %}
+          <div class="body">
+            <div class="li-text">{{ p.text }}</div>
+            <div class="li-meta">
+              {% if p.likes %}<span>👍 {{ p.likes }}</span>{% endif %}
+              {% if p.comments %}<span>💬 {{ p.comments }}</span>{% endif %}
+              {% if p.get('shares') %}<span>🔁 {{ p.shares }}</span>{% endif %}
+            </div>
+            <a class="btn-summary"
+               href="/li-search/post?id={{ p.id }}&url={{ p.url | urlencode }}&author={{ p.author | urlencode }}&headline={{ (p.headline or '') | urlencode }}&date={{ (p.date or '') | urlencode }}&likes={{ p.likes }}&comments={{ p.comments }}&search_term={{ term | urlencode }}"
+               target="_blank">View Summary</a>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty" style="margin-top:12px;">No results.</p>
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% endif %}
 </div>
 
 <script>
+function onSrcChange(which) {
+  const ytCb = document.getElementById('src-yt');
+  const liCb = document.getElementById('src-li');
+
+  // Checking one unchecks the other; prevent both unchecked
+  if (which === 'yt' && ytCb.checked) { liCb.checked = false; }
+  if (which === 'li' && liCb.checked) { ytCb.checked = false; }
+  if (!ytCb.checked && !liCb.checked) {
+    (which === 'yt' ? ytCb : liCb).checked = true;
+  }
+
+  const li = liCb.checked;
+  document.getElementById('main-form').action = li ? '/li-search/run' : '/run';
+  document.getElementById('sort-wrap').style.display   = li ? 'none' : '';
+  document.getElementById('adhoc-form').style.display  = li ? 'none' : '';
+  document.getElementById('run-btn').textContent       = li ? 'Search LinkedIn' : 'Run summary';
+  document.getElementById('max-label').textContent     = li ? 'Posts / term' : 'Videos / term';
+  document.getElementById('date-label').textContent    = li ? 'Posted' : 'Uploaded';
+  document.getElementById('max-input').max             = li ? '50' : '15';
+  document.getElementById('run-hint').innerHTML        = li
+    ? 'Results via Apify · apimaestro/linkedin-posts-search-scraper-no-cookies'
+    : 'No boxes ticked = run <strong>all</strong> terms. Click <strong>Get Summary</strong> on any card to fetch its transcript on demand. <strong>Detail</strong> controls summary depth.';
+}
+
 function toggleGroup(masterCb) {
   const group = masterCb.dataset.group;
   const checked = masterCb.checked;
