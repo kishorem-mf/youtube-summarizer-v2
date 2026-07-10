@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reading Queue</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e7e9ee; --mut:#9aa3b2; --accent:#ff4d4f; --good:#3ecf8e; --warn:#f5a623; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+    .app-shell-header { background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:0; padding:0 24px; height:52px; }
+    .brand { display:flex; align-items:center; gap:8px; margin-right:32px; }
+    .brand-icon { font-size:20px; }
+    .brand-name { font-size:15px; font-weight:600; color:var(--fg); white-space:nowrap; }
+    .app-tabs { display:flex; gap:0; height:100%; }
+    .app-tab { display:flex; align-items:center; padding:0 18px; font-size:14px; color:var(--mut); text-decoration:none; border-bottom:2px solid transparent; white-space:nowrap; }
+    .app-tab:hover { color:var(--fg); }
+    .app-tab.active { color:var(--fg); border-bottom-color:var(--accent); font-weight:600; }
+    .wrap { max-width:920px; margin:0 auto; padding:24px; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    .sub { color:var(--mut); font-size:13px; margin-bottom:20px; }
+    .item { background:var(--card); border:1px solid var(--line); border-radius:12px; margin-bottom:14px; overflow:hidden; }
+    .item.read { opacity:.62; }
+    .item-head { display:flex; gap:14px; padding:14px 18px; align-items:flex-start; }
+    .item-head img { width:120px; aspect-ratio:16/9; object-fit:cover; border-radius:6px; flex-shrink:0; }
+    .meta { flex:1; min-width:0; }
+    .meta h4 { margin:0 0 4px; font-size:15px; line-height:1.4; }
+    .meta h4 a { color:var(--fg); text-decoration:none; }
+    .meta h4 a:hover { color:var(--accent); }
+    .stats { font-size:12px; color:var(--mut); }
+    .term-chip { display:inline-block; margin-top:6px; background:#2a1a3a; color:#c084fc; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:600; }
+    .badge { display:inline-block; border-radius:20px; padding:2px 10px; font-size:11px; font-weight:600; white-space:nowrap; }
+    .badge.unread { background:#3a2a1a; color:var(--warn); }
+    .badge.read   { background:#1a2a1a; color:var(--good); }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    button { border:0; border-radius:8px; padding:7px 14px; font-weight:600; cursor:pointer; font-size:13px; }
+    .toggle-read { background:var(--good); color:#062; }
+    .read-btn { background:var(--line); color:var(--fg); }
+    .summary-panel { display:none; padding:0 18px 18px; }
+    .summary-panel.open { display:block; }
+    .summary-body { font-size:14px; line-height:1.7; color:var(--fg); }
+    .summary-body strong { color:#fff; }
+    .summary-body h3, .summary-body h4, .summary-body h5, .summary-body h6 { margin:14px 0 6px; color:#fff; font-weight:700; }
+    .summary-body h3 { font-size:16px; } .summary-body h4 { font-size:15px; } .summary-body h5, .summary-body h6 { font-size:14px; }
+    .summary-body p { margin:7px 0; }
+    .summary-body ul, .summary-body ol { margin:7px 0; padding-left:22px; }
+    .summary-body li { margin:4px 0; }
+    .summary-body > :first-child { margin-top:0; }
+    .questions { margin:14px 0 0; padding-left:18px; font-size:13px; color:var(--mut); }
+    .no-results { color:var(--mut); font-size:14px; padding:48px; text-align:center; }
+    .detail-wrap { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--mut); }
+    .detail-sel { background:#0f1115; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:5px 8px; font-size:12px; cursor:pointer; }
+    .detail-sel:disabled { opacity:.5; }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+<div class="wrap">
+  <h1>📖 Reading Queue</h1>
+  <div class="sub">Your to-read queue — approved items summarized at medium detail. Expand to read, change depth (Low/Medium/High), then <strong>Mark read</strong> to clear it from the queue (it stays in DB Explorer).</div>
+
+  {% if rows %}
+  {% for r in rows %}
+  <div class="item" id="item-{{ r.video_id }}"
+       data-video-id="{{ r.video_id }}" data-detail="{{ r.detail }}">
+    <div class="item-head">
+      {% if r.thumbnail %}<a href="{{ r.url }}" target="_blank"><img src="{{ r.thumbnail }}" loading="lazy" alt=""></a>{% endif %}
+      <div class="meta">
+        <h4><a href="{{ r.url }}" target="_blank">{{ r.title }}</a></h4>
+        <div class="stats">{{ r.channel }}{% if r.views %} · {{ "{:,}".format(r.views|int) }} views{% endif %}{% if r.date %} · {{ r.date }}{% endif %}{% if r.duration %} · {{ r.duration }}{% endif %}</div>
+        {% if r.search_term %}<span class="term-chip">{{ r.search_term }}</span>{% endif %}
+        <div class="controls">
+          <button class="read-btn" onclick="toggleSummary(this)" data-vid="{{ r.video_id }}" data-detail="{{ r.detail }}">Read summary ▼</button>
+          <label class="detail-wrap">Detail
+            <select class="detail-sel" onchange="regenerate(this)">
+              <option value="low"    {% if r.detail == 'low'    %}selected{% endif %}>Low</option>
+              <option value="medium" {% if r.detail == 'medium' %}selected{% endif %}>Medium</option>
+              <option value="high"   {% if r.detail == 'high'   %}selected{% endif %}>High</option>
+            </select>
+          </label>
+          <button class="toggle-read" onclick="markRead(this)">✓ Mark read</button>
+        </div>
+      </div>
+    </div>
+    <div class="summary-panel" id="panel-{{ r.video_id }}">
+      <div class="summary-body" id="body-{{ r.video_id }}"><span style="color:var(--mut);font-size:13px;">Loading…</span></div>
+      <ol class="questions" id="q-{{ r.video_id }}" hidden></ol>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="no-results">Nothing queued yet. Approve items in the <a href="/inbox" style="color:var(--good);">Inbox</a> to add them here.</div>
+  {% endif %}
+</div>
+
+<script>
+  function mdlite(text) {
+    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    let html = '', list = null;
+    const closeList = () => { if (list) { html += '</' + list + '>'; list = null; } };
+    for (const raw of String(text || '').split('\n')) {
+      const line = raw.trim();
+      if (!line) { closeList(); continue; }
+      let m;
+      if (m = line.match(/^(#{1,6})\s+(.*)$/)) {
+        closeList(); const lvl = Math.min(m[1].length + 2, 6);
+        html += '<h' + lvl + '>' + inline(m[2]) + '</h' + lvl + '>';
+      } else if (m = line.match(/^[-*•]\s+(.*)$/)) {
+        if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
+        html += '<li>' + inline(m[1]) + '</li>';
+      } else if (m = line.match(/^\d+[.)]\s+(.*)$/)) {
+        if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; }
+        html += '<li>' + inline(m[1]) + '</li>';
+      } else {
+        closeList(); html += '<p>' + inline(line) + '</p>';
+      }
+    }
+    closeList();
+    return html;
+  }
+  function toggleSummary(btn) {
+    const vid = btn.dataset.vid;
+    const panel = document.getElementById('panel-' + vid);
+    const body  = document.getElementById('body-' + vid);
+    if (panel.classList.contains('open')) {
+      panel.classList.remove('open'); btn.textContent = 'Read summary ▼'; return;
+    }
+    panel.classList.add('open'); btn.textContent = 'Hide summary ▲';
+    if (!body.dataset.loaded) {
+      body.dataset.loaded = '1';
+      fetch(`/dynamo/item/${encodeURIComponent(vid)}/${encodeURIComponent(btn.dataset.detail)}`)
+        .then(r => r.json()).then(data => {
+          if (data.error) { body.textContent = 'Error: ' + data.error; return; }
+          body.innerHTML = mdlite(data.summary || '(no summary)');
+          const q = document.getElementById('q-' + vid);
+          if (data.questions && data.questions.length) {
+            q.innerHTML = data.questions.map(x => `<li>${x}</li>`).join('');
+            q.hidden = false;
+          }
+        }).catch(() => { body.textContent = 'Failed to load summary.'; });
+    }
+  }
+  function markRead(btn) {
+    const item = btn.closest('.item');
+    btn.disabled = true;
+    fetch('/reading/toggle-read', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ video_id: item.dataset.videoId, detail: item.dataset.detail, read: true }),
+    }).then(r => r.json()).then(() => {
+      // Read items leave the queue (still kept in DynamoDB / DB Explorer)
+      item.style.transition = 'opacity .25s'; item.style.opacity = '0';
+      setTimeout(() => {
+        item.remove();
+        if (!document.querySelectorAll('.item').length) location.reload();
+      }, 260);
+    }).catch(err => { btn.disabled = false; alert('Request failed: ' + err); });
+  }
+  function regenerate(sel) {
+    const item      = sel.closest('.item');
+    const vid       = item.dataset.videoId;
+    const oldDetail = item.dataset.detail;
+    const newDetail = sel.value;
+    if (newDetail === oldDetail) return;
+    const panel   = document.getElementById('panel-' + vid);
+    const body    = document.getElementById('body-' + vid);
+    const readBtn = item.querySelector('.read-btn');
+    const qEl     = document.getElementById('q-' + vid);
+    sel.disabled = true;
+    panel.classList.add('open');
+    readBtn.textContent = 'Hide summary ▲';
+    body.dataset.loaded = '1';
+    body.innerHTML = '<span style="color:var(--mut);font-size:13px;">Regenerating at ' + newDetail + ' detail…</span>';
+    fetch('/reading/regenerate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ video_id: vid, detail: oldDetail, new_detail: newDetail }),
+    }).then(r => r.json()).then(data => {
+      sel.disabled = false;
+      if (!data.ok) { body.textContent = 'Error: ' + (data.error || 'failed'); sel.value = oldDetail; return; }
+      item.dataset.detail    = data.detail;   // keep mark-read in sync
+      readBtn.dataset.detail = data.detail;    // keep lazy re-fetch in sync
+      body.innerHTML = mdlite(data.summary || '(no summary)');
+      if (data.questions && data.questions.length) {
+        qEl.innerHTML = data.questions.map(x => `<li>${x}</li>`).join('');
+        qEl.hidden = false;
+      } else { qEl.hidden = true; qEl.innerHTML = ''; }
+    }).catch(err => { sel.disabled = false; sel.value = oldDetail; body.textContent = 'Request failed: ' + err; });
+  }
+</script>
+</body>
+</html>

@@ -62,12 +62,48 @@ os.makedirs(OUTPUTS, exist_ok=True)
 
 @app.template_filter("mdlite")
 def mdlite(text):
-    """Render the LLM's lightweight markdown (just **bold**) as HTML, escaping
-    everything else. Newlines are preserved by the CSS (white-space:pre-wrap)."""
+    """Render the LLM's lightweight markdown as safe HTML: # headings,
+    - / * / • and 1. list items, and **bold**. Everything else is escaped."""
     from markupsafe import escape, Markup
-    esc = str(escape(text or ""))
-    esc = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
-    return Markup(esc)
+
+    def inline(s):
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", str(escape(s)))
+
+    html, list_type = [], None
+
+    def close_list():
+        nonlocal list_type
+        if list_type:
+            html.append(f"</{list_type}>")
+            list_type = None
+
+    for raw in str(text or "").split("\n"):
+        line = raw.strip()
+        if not line:
+            close_list()
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            close_list()
+            level = min(len(m.group(1)) + 2, 6)   # '#' -> <h3>
+            html.append(f"<h{level}>{inline(m.group(2))}</h{level}>")
+            continue
+        m = re.match(r"^[-*•]\s+(.*)$", line)
+        if m:
+            if list_type != "ul":
+                close_list(); html.append("<ul>"); list_type = "ul"
+            html.append(f"<li>{inline(m.group(1))}</li>")
+            continue
+        m = re.match(r"^\d+[.)]\s+(.*)$", line)
+        if m:
+            if list_type != "ol":
+                close_list(); html.append("<ol>"); list_type = "ol"
+            html.append(f"<li>{inline(m.group(1))}</li>")
+            continue
+        close_list()
+        html.append(f"<p>{inline(line)}</p>")
+    close_list()
+    return Markup("".join(html))
 
 
 @app.route("/", methods=["GET"])
@@ -213,6 +249,173 @@ def video_page(video_id):
     )
 
 
+# ─────────────────────────────────────────────
+# Agentic inbox: collect search hits → review → approve (summarize) → reading queue
+# ─────────────────────────────────────────────
+
+@app.route("/inbox/collect", methods=["POST"])
+def inbox_collect():
+    """Search the selected terms (no LLM) and drop each hit into the inbox."""
+    selected = request.form.getlist("terms")
+    custom = (request.form.get("custom") or "").strip()
+    if custom:
+        selected = selected + [t.strip() for t in custom.split(",") if t.strip()]
+    if not selected:
+        selected = search_terms.all_terms()
+
+    try:
+        max_results = max(1, min(15, int(request.form.get("max_results", DEFAULT_MAX))))
+    except ValueError:
+        max_results = DEFAULT_MAX
+
+    valid_dates = {v for v, _ in DATE_WINDOWS}
+    date_filter = request.form.get("date_filter", DEFAULT_DATE_FILTER)
+    if date_filter not in valid_dates:
+        date_filter = DEFAULT_DATE_FILTER
+
+    term_pairs = [(label, search_terms.build_query(label)) for label in selected]
+    results, videos_by_id, errors = summarizer.run_terms(
+        term_pairs, max_results=max_results,
+        date_filter=date_filter or None, sort_order=DEFAULT_SORT,
+    )
+
+    # Map each video id back to the search-term label it surfaced under
+    label_by_id = {}
+    for label, buckets in results.items():
+        for bucket in ("top", "trending"):
+            for v in buckets.get(bucket, []):
+                label_by_id.setdefault(v["id"], label)
+
+    added = skipped = 0
+    for vid, video in videos_by_id.items():
+        if storage.save_candidate(video, search_term=label_by_id.get(vid, "")):
+            added += 1
+        else:
+            skipped += 1
+    return redirect(url_for("inbox_page", added=added, skipped=skipped))
+
+
+@app.route("/inbox")
+def inbox_page():
+    rows = storage.list_by_status("inbox")
+    return render_template(
+        "inbox.html", active_tab="inbox", rows=rows,
+        added=request.args.get("added"), skipped=request.args.get("skipped"),
+    )
+
+
+@app.route("/inbox/approve", methods=["POST"])
+def inbox_approve():
+    """Summarize an approved candidate at medium detail (synchronously) and move it
+    into the reading queue as unread. Depth can be changed later in Reading.
+    On failure the row is left in the inbox."""
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    video = {
+        "id":          data.get("video_id", ""),
+        "url":         data.get("url", ""),
+        "title":       data.get("title", ""),
+        "channel":     data.get("channel", ""),
+        "views":       int(data.get("views", 0) or 0),
+        "date":        data.get("date", ""),
+        "duration":    data.get("duration", ""),
+        "thumbnail":   data.get("thumbnail", ""),
+        "description": data.get("description", ""),
+    }
+    detail = "medium"
+    result = summarizer.fetch_and_summarize(video, detail=detail)
+    if result.get("error") or not result.get("summary"):
+        return jsonify({"ok": False, "error": result.get("error") or "No summary produced"})
+    result["search_term"] = data.get("search_term", "")
+    storage.save_result(video, detail, result, source_platform="youtube",
+                        content_type="video", status="approved", read=False)
+    # If the candidate was stored under a different detail (legacy rows), drop it
+    orig_detail = data.get("detail", detail)
+    if orig_detail and orig_detail != detail:
+        storage.delete_item(video["id"], orig_detail)
+    return jsonify({"ok": True})
+
+
+@app.route("/reading/regenerate", methods=["POST"])
+def reading_regenerate():
+    """Re-summarize a reading item at a new detail level and persist it, replacing
+    the old-detail row so there stays one entry per video. Preserves the read flag."""
+    from flask import jsonify
+    data       = request.get_json(force=True) or {}
+    vid        = data.get("video_id", "")
+    old_detail = data.get("detail", "medium")
+    new_detail = data.get("new_detail", "medium")
+    if new_detail not in {"low", "medium", "high"}:
+        return jsonify({"ok": False, "error": "Invalid detail level"})
+
+    row = storage._dynamo_table().get_item(
+        Key={"video_id": vid, "detail": old_detail}
+    ).get("Item")
+    if not row:
+        return jsonify({"ok": False, "error": "Item not found"})
+
+    video = {
+        "id":          vid,
+        "url":         row.get("url", ""),
+        "title":       row.get("title", ""),
+        "channel":     row.get("channel", ""),
+        "views":       int(row.get("views", 0) or 0),
+        "date":        row.get("date", ""),
+        "duration":    row.get("duration", ""),
+        "thumbnail":   row.get("thumbnail", ""),
+        "description": row.get("description", ""),
+    }
+    result = summarizer.fetch_and_summarize(video, detail=new_detail)
+    if result.get("error") or not result.get("summary"):
+        return jsonify({"ok": False, "error": result.get("error") or "No summary produced"})
+    result["search_term"] = row.get("search_term", "")
+    read_flag = bool(row.get("read", False))
+    storage.save_result(video, new_detail, result, source_platform="youtube",
+                        content_type="video", status="approved", read=read_flag)
+    if new_detail != old_detail:
+        storage.delete_item(vid, old_detail)
+    return jsonify({
+        "ok":        True,
+        "detail":    new_detail,
+        "summary":   result.get("summary", ""),
+        "questions": result.get("questions", []),
+    })
+
+
+@app.route("/inbox/decline", methods=["POST"])
+def inbox_decline():
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    storage.delete_item(data.get("video_id", ""), data.get("detail", "high"))
+    return jsonify({"ok": True})
+
+
+@app.route("/reading")
+def reading_page():
+    # Reading queue = unread approved items only. Read items stay in DynamoDB
+    # (status="approved", read=true) and remain visible in DB Explorer.
+    rows = [r for r in storage.list_by_status("approved") if not r.get("read")]
+    return render_template("reading.html", active_tab="reading", rows=rows)
+
+
+@app.route("/reading/toggle-read", methods=["POST"])
+def reading_toggle_read():
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    storage.set_read(data.get("video_id", ""), data.get("detail", "high"), bool(data.get("read")))
+    return jsonify({"ok": True})
+
+
+@app.route("/inbox/counts")
+def inbox_counts():
+    from flask import jsonify
+    unread_approved = sum(1 for r in storage.list_by_status("approved") if not r.get("read"))
+    return jsonify({
+        "inbox":   storage.count_by_status("inbox"),
+        "reading": unread_approved,
+    })
+
+
 @app.route("/transcript", methods=["GET", "POST"])
 def transcript():
     """Ad-hoc: one YouTube URL -> transcript + summary at the chosen detail."""
@@ -255,7 +458,7 @@ def dynamo_explorer():
     from boto3.dynamodb.conditions import Key as DKey
 
     ctx = dict(rows=None, query_type="get_item", video_id="", detail="",
-               limit="20", search_term="", tag="", platform="",
+               limit="20", search_term=[], tag=[], platform="",
                query_label="", message=None, message_type=None)
 
     if request.method == "GET":
@@ -265,12 +468,14 @@ def dynamo_explorer():
     qt          = request.form.get("query_type", "get_item")
     video_id    = request.form.get("video_id", "").strip()
     detail      = request.form.get("detail", "").strip()
-    search_term = request.form.get("search_term", "").strip()
-    tag         = request.form.get("tag", "").strip()
-    platform    = request.form.get("platform", "").strip()
-    limit       = max(1, min(100, int(request.form.get("limit", "20") or "20")))
+    search_terms = [s.strip() for s in request.form.getlist("search_term") if s.strip()]
+    tags         = [t.strip() for t in request.form.getlist("tag") if t.strip()]
+    search_term  = search_terms  # keep ctx key name for template compatibility
+    tag          = tags
+    platform     = request.form.get("platform", "").strip()
+    limit        = max(1, min(100, int(request.form.get("limit", "20") or "20")))
     ctx.update(query_type=qt, video_id=video_id, detail=detail,
-               search_term=search_term, tag=tag, platform=platform, limit=str(limit))
+               search_term=search_terms, tag=tags, platform=platform, limit=str(limit))
 
     table = storage._dynamo_table()
 
@@ -321,12 +526,19 @@ def dynamo_explorer():
 
         elif qt == "by_topic":
             from boto3.dynamodb.conditions import Attr
-            if not search_term:
-                ctx.update(message="Topic (search_term) is required.", message_type="err", rows=[])
+            if not search_terms:
+                ctx.update(message="At least one Topic is required.", message_type="err", rows=[])
             else:
-                fe = Attr("search_term").eq(search_term)
-                if tag:
-                    fe = fe & Attr("tags").contains(tag)
+                fe = None
+                for st in search_terms:
+                    c = Attr("search_term").eq(st)
+                    fe = c if fe is None else fe | c
+                if tags:
+                    tag_fe = None
+                    for tg in tags:
+                        c = Attr("tags").contains(tg)
+                        tag_fe = c if tag_fe is None else tag_fe | c
+                    fe = fe & tag_fe
                 scan_kwargs = {"FilterExpression": fe, "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
@@ -337,15 +549,19 @@ def dynamo_explorer():
                         break
                     scan_kwargs["ExclusiveStartKey"] = lek
                 all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
-                label = f"topic · {search_term}" + (f" + tag · {tag}" if tag else "")
+                label = "topic · " + ", ".join(search_terms) + ((" + tag · " + ", ".join(tags)) if tags else "")
                 ctx.update(rows=all_rows[:limit], query_label=label)
 
         elif qt == "by_tag":
             from boto3.dynamodb.conditions import Attr
-            if not tag:
-                ctx.update(message="Tag is required.", message_type="err", rows=[])
+            if not tags:
+                ctx.update(message="At least one Tag is required.", message_type="err", rows=[])
             else:
-                scan_kwargs = {"FilterExpression": Attr("tags").contains(tag), "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
+                fe = None
+                for tg in tags:
+                    c = Attr("tags").contains(tg)
+                    fe = c if fe is None else fe | c
+                scan_kwargs = {"FilterExpression": fe, "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -355,7 +571,7 @@ def dynamo_explorer():
                         break
                     scan_kwargs["ExclusiveStartKey"] = lek
                 all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
-                ctx.update(rows=all_rows[:limit], query_label=f"tag · {tag}")
+                ctx.update(rows=all_rows[:limit], query_label="tag · " + ", ".join(tags))
 
         elif qt == "by_platform":
             from boto3.dynamodb.conditions import Attr

@@ -53,7 +53,15 @@
     .card h4 a { color:var(--fg); text-decoration:none; }
     .card h4 a:hover { color:var(--accent); }
     .stats { color:var(--mut); font-size:12px; margin-bottom:8px; }
-    .summary { font-size:13px; white-space:pre-wrap; }
+    .summary { font-size:13px; line-height:1.65; }
+    .summary h3, .summary h4, .summary h5, .summary h6 { margin:14px 0 6px; color:var(--fg); font-weight:700; }
+    .summary h3 { font-size:15px; } .summary h4 { font-size:14px; } .summary h5, .summary h6 { font-size:13px; }
+    .summary p { margin:6px 0; }
+    .summary ul, .summary ol { margin:6px 0; padding-left:22px; }
+    .summary li { margin:3px 0; }
+    .summary strong { color:#fff; }
+    .summary > :first-child { margin-top:0; }
+    .summary > :last-child { margin-bottom:0; }
     .rank { display:inline-block; min-width:20px; color:var(--accent); font-weight:700; }
     .err { color:var(--accent); font-size:13px; }
     .empty { color:var(--mut); font-style:italic; }
@@ -152,6 +160,10 @@
         <input type="text" name="custom" placeholder="comma-separated" value="{{ custom or '' }}">
       </label>
       <button type="submit" id="run-btn">{% if search_mode == 'linkedin' %}Search LinkedIn{% else %}Run summary{% endif %}</button>
+      {% if search_mode != 'linkedin' %}
+      <button type="submit" id="collect-btn" formaction="/inbox/collect"
+        style="background:#3ecf8e;color:#062;">📥 Collect to Inbox</button>
+      {% endif %}
     </div>
     <div class="hint" id="run-hint">
       {% if search_mode == 'linkedin' %}
@@ -366,8 +378,28 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function mdlite(s) {
-  return escHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+function mdlite(text) {
+  const inline = s => escHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  let html = '', list = null;
+  const closeList = () => { if (list) { html += '</' + list + '>'; list = null; } };
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line) { closeList(); continue; }
+    let m;
+    if (m = line.match(/^(#{1,6})\s+(.*)$/)) {
+      closeList(); html += '<h' + Math.min(m[1].length + 2, 6) + '>' + inline(m[2]) + '</h' + Math.min(m[1].length + 2, 6) + '>';
+    } else if (m = line.match(/^[-*•]\s+(.*)$/)) {
+      if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
+      html += '<li>' + inline(m[1]) + '</li>';
+    } else if (m = line.match(/^\d+[.)]\s+(.*)$/)) {
+      if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; }
+      html += '<li>' + inline(m[1]) + '</li>';
+    } else {
+      closeList(); html += '<p>' + inline(line) + '</p>';
+    }
+  }
+  closeList();
+  return html;
 }
 
 async function getSummary(btn) {

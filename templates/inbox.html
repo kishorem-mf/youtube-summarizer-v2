@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e7e9ee; --mut:#9aa3b2; --accent:#ff4d4f; --good:#3ecf8e; --warn:#f5a623; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+    .app-shell-header { background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:0; padding:0 24px; height:52px; }
+    .brand { display:flex; align-items:center; gap:8px; margin-right:32px; }
+    .brand-icon { font-size:20px; }
+    .brand-name { font-size:15px; font-weight:600; color:var(--fg); white-space:nowrap; }
+    .app-tabs { display:flex; gap:0; height:100%; }
+    .app-tab { display:flex; align-items:center; padding:0 18px; font-size:14px; color:var(--mut); text-decoration:none; border-bottom:2px solid transparent; white-space:nowrap; }
+    .app-tab:hover { color:var(--fg); }
+    .app-tab.active { color:var(--fg); border-bottom-color:var(--accent); font-weight:600; }
+    .wrap { max-width:1300px; margin:0 auto; padding:24px; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    .sub { color:var(--mut); font-size:13px; margin-bottom:20px; }
+    .flash { padding:10px 16px; border-radius:8px; margin-bottom:16px; font-size:14px; background:#1a3a2a; border:1px solid var(--good); color:var(--good); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:16px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
+    .card img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; }
+    .card .body { padding:14px 16px; display:flex; flex-direction:column; gap:8px; flex:1; }
+    .card h4 { margin:0; font-size:14px; line-height:1.4; }
+    .card h4 a { color:var(--fg); text-decoration:none; }
+    .card h4 a:hover { color:var(--accent); }
+    .stats { font-size:12px; color:var(--mut); }
+    .desc { font-size:12px; color:var(--mut); line-height:1.5; max-height:4.5em; overflow:hidden; }
+    .term-chip { align-self:flex-start; background:#2a1a3a; color:#c084fc; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:600; }
+    .actions { display:flex; gap:8px; margin-top:auto; padding-top:6px; }
+    button { border:0; border-radius:8px; padding:8px 16px; font-weight:600; cursor:pointer; font-size:13px; }
+    button:disabled { opacity:.5; cursor:default; }
+    .approve { background:var(--good); color:#062; }
+    .decline { background:var(--line); color:var(--warn); }
+    .no-results { color:var(--mut); font-size:14px; padding:48px; text-align:center; }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+<div class="wrap">
+  <h1>📥 Inbox</h1>
+  <div class="sub">Search hits waiting for review. <strong>Approve</strong> to summarize (high detail) and send to Reading, or <strong>Decline</strong> to discard.</div>
+
+  {% if added is not none %}
+  <div class="flash">Collected {{ added }} new item{{ '' if added == '1' else 's' }} to the inbox{% if skipped and skipped != '0' %} · {{ skipped }} already present{% endif %}.</div>
+  {% endif %}
+
+  {% if rows %}
+  <div class="grid" id="grid">
+    {% for r in rows %}
+    <div class="card" id="card-{{ r.video_id }}"
+         data-video-id="{{ r.video_id }}" data-detail="{{ r.detail }}"
+         data-url="{{ r.url }}" data-title="{{ r.title }}" data-channel="{{ r.channel }}"
+         data-views="{{ r.views }}" data-date="{{ r.date }}" data-duration="{{ r.duration }}"
+         data-thumbnail="{{ r.thumbnail }}" data-description="{{ r.description }}"
+         data-search-term="{{ r.search_term }}">
+      {% if r.thumbnail %}<a href="{{ r.url }}" target="_blank"><img src="{{ r.thumbnail }}" loading="lazy" alt=""></a>{% endif %}
+      <div class="body">
+        {% if r.search_term %}<span class="term-chip">{{ r.search_term }}</span>{% endif %}
+        <h4><a href="{{ r.url }}" target="_blank">{{ r.title }}</a></h4>
+        <div class="stats">{{ r.channel }}{% if r.views %} · {{ "{:,}".format(r.views|int) }} views{% endif %}{% if r.date %} · {{ r.date }}{% endif %}{% if r.duration %} · {{ r.duration }}{% endif %}</div>
+        {% if r.description %}<div class="desc">{{ r.description }}</div>{% endif %}
+        <div class="actions">
+          <button class="approve" onclick="approve(this)">✓ Approve</button>
+          <button class="decline" onclick="decline(this)">✕ Decline</button>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="no-results">Inbox is empty. Go to <a href="/" style="color:var(--good);">Search</a>, pick a group, and click <strong>Collect to Inbox</strong>.</div>
+  {% endif %}
+</div>
+
+<script>
+  function payloadFrom(card) {
+    const d = card.dataset;
+    return {
+      video_id: d.videoId, detail: d.detail, url: d.url, title: d.title,
+      channel: d.channel, views: d.views, date: d.date, duration: d.duration,
+      thumbnail: d.thumbnail, description: d.description, search_term: d.searchTerm,
+    };
+  }
+  function removeCard(card) {
+    card.style.transition = 'opacity .25s'; card.style.opacity = '0';
+    setTimeout(() => {
+      card.remove();
+      if (!document.querySelectorAll('#grid .card').length) location.reload();
+    }, 260);
+  }
+  function approve(btn) {
+    const card = btn.closest('.card');
+    const buttons = card.querySelectorAll('button');
+    buttons.forEach(b => b.disabled = true);
+    btn.textContent = 'Summarizing…';
+    fetch('/inbox/approve', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payloadFrom(card)),
+    }).then(r => r.json()).then(data => {
+      if (data.ok) { removeCard(card); }
+      else {
+        buttons.forEach(b => b.disabled = false);
+        btn.textContent = '✓ Approve';
+        alert('Could not summarize: ' + (data.error || 'unknown error'));
+      }
+    }).catch(err => {
+      buttons.forEach(b => b.disabled = false);
+      btn.textContent = '✓ Approve';
+      alert('Request failed: ' + err);
+    });
+  }
+  function decline(btn) {
+    const card = btn.closest('.card');
+    card.querySelectorAll('button').forEach(b => b.disabled = true);
+    fetch('/inbox/decline', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ video_id: card.dataset.videoId, detail: card.dataset.detail }),
+    }).then(r => r.json()).then(() => removeCard(card))
+      .catch(err => alert('Request failed: ' + err));
+  }
+</script>
+</body>
+</html>

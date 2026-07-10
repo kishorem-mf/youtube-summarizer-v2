@@ -510,23 +510,28 @@ SYSTEM_PROMPT = (
     "information is thin, say so briefly rather than padding."
 )
 
+# char_limit = max transcript chars fed to the LLM. Set high enough to cover
+# full transcripts (Opus 4.8 has a 200K-token context; ~200K chars ≈ 50K tokens),
+# so long videos aren't silently truncated mid-transcript. Only the output length
+# (max_tokens) and instruction differ by detail level.
+_CHAR_LIMIT = 200_000
 DETAIL_SPECS = {
     "low": (
         "Output a one-sentence TL;DR, then 2-3 short bullet points of the most "
         "important takeaways.",
-        320, 6000,
+        320, _CHAR_LIMIT,
     ),
     "medium": (
         "Output a one-sentence TL;DR, then 4-6 bullet points capturing the key "
         "concrete takeaways with specifics.",
-        550, 9000,
+        550, _CHAR_LIMIT,
     ),
     "high": (
         "Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering "
         "all key concepts, examples, numbers, tools/products named, and "
         "actionable takeaways. Group bullets under short bold sub-headings when "
         "the content has distinct themes.",
-        2000, 16000,
+        2000, _CHAR_LIMIT,
     ),
 }
 DEFAULT_DETAIL = "medium"
@@ -692,5 +697,8 @@ def summarize_url(url, detail=DEFAULT_DETAIL):
         "title": f"Video {vid}", "channel": "", "views": 0,
         "date": "", "duration": f"{result['durationMinutes']} min",
     }
-    result["summary"] = summarize_video(pseudo, result["transcript"], detail=detail)
+    # summarize_video returns (summary, questions) — unpack, don't store the tuple
+    summary, questions = summarize_video(pseudo, result["transcript"], detail=detail)
+    result["summary"] = summary
+    result["questions"] = questions
     return result
