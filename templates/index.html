@@ -211,6 +211,16 @@
         <div class="body">
           <h4>Key points</h4>
           <div class="summary">{{ transcript_result.summary | mdlite }}</div>
+          {% if transcript_result.summary and not transcript_result.error %}
+          <form method="post" action="/adhoc/save" style="margin-top:14px;">
+            <input type="hidden" name="video_id" value="{{ transcript_result.videoId }}">
+            <input type="hidden" name="detail" value="{{ transcript_result.detail }}">
+            <button type="submit" style="background:#3ecf8e;color:#062;border:0;border-radius:8px;padding:9px 18px;font-weight:600;cursor:pointer;font-size:14px;">
+              📥 Save to Reading queue
+            </button>
+            <span class="hint" style="margin-left:8px;">Saves this summary + video details to the DB and adds it to your Reading queue.</span>
+          </form>
+          {% endif %}
         </div>
       </div>
       <details class="transcript-box">

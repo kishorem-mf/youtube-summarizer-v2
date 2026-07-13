@@ -35,6 +35,11 @@ DEFAULT_MAX = int(os.environ.get("DEFAULT_MAX_RESULTS", "6"))
 # survives the redirect to the post detail page without URL-encoding it.
 _li_post_cache: dict = {}
 
+# In-process cache for ad-hoc research results (keyed by video id) so the
+# "Save to Reading" button can persist the already-computed summary without
+# round-tripping the full transcript through the form.
+_adhoc_cache: dict = {}
+
 # Upload-date windows offered in the UI -> yt-dlp dateFilter values.
 DATE_WINDOWS = [
     ("", "Any time"),
@@ -434,6 +439,10 @@ def transcript():
         tr = summarizer.summarize_url(url, detail=detail)
     tr["detail"] = detail
 
+    # Cache the computed result so /adhoc/save can persist it without re-summarizing
+    if not tr.get("error") and tr.get("summary") and tr.get("videoId"):
+        _adhoc_cache[tr["videoId"]] = tr
+
     return render_template(
         "index.html",
         active_tab="search",
@@ -450,6 +459,50 @@ def transcript():
         results=None,
         transcript_result=tr,
     )
+
+
+@app.route("/adhoc/save", methods=["POST"])
+def adhoc_save():
+    """Persist an ad-hoc research result (already summarized) as an approved,
+    unread Reading-queue item — reusing the summary/tags/questions + real video
+    metadata. Falls back to recomputing if the in-process cache has expired."""
+    vid    = (request.form.get("video_id") or "").strip()
+    detail = request.form.get("detail", DEFAULT_DETAIL)
+    if not vid:
+        return redirect(url_for("index"))
+
+    tr = _adhoc_cache.get(vid)
+    if not tr:  # cache miss (e.g. server restarted) — recompute from the URL
+        tr = summarizer.summarize_url(f"https://www.youtube.com/watch?v={vid}", detail=detail)
+        tr["detail"] = detail
+    if tr.get("error") or not tr.get("summary"):
+        return redirect(url_for("index"))
+
+    video = {
+        "id":          vid,
+        "url":         tr.get("url", f"https://www.youtube.com/watch?v={vid}"),
+        "title":       tr.get("title", ""),
+        "channel":     tr.get("channel", ""),
+        "views":       int(tr.get("views", 0) or 0),
+        "date":        tr.get("date", ""),
+        "duration":    tr.get("duration", ""),
+        "thumbnail":   tr.get("thumbnail", ""),
+        "description": "",
+    }
+    result = {
+        "transcript":  tr.get("transcript", ""),
+        "summary":     tr.get("summary", ""),
+        "tags":        tr.get("tags", []),
+        "questions":   tr.get("questions", []),
+        "source":      "youtube-transcript-api",
+        "wordCount":   tr.get("wordCount", 0),
+        "language":    tr.get("language", ""),
+        "search_term": "ad-hoc research",
+    }
+    storage.save_result(video, tr.get("detail", detail), result,
+                        source_platform="youtube", content_type="video",
+                        status="approved", read=False)
+    return redirect(url_for("reading_page"))
 
 
 @app.route("/dynamo", methods=["GET", "POST"])
@@ -953,6 +1006,129 @@ def linkedin_download():
         as_attachment=True,
         download_name=os.path.basename(matches[0]),
     )
+
+
+def _foundry_client():
+    """Anthropic client against the Azure AI Foundry endpoint — same config the
+    DB Explorer LinkedIn export uses."""
+    import anthropic as _asdk, httpx as _httpx
+    return _asdk.Anthropic(
+        api_key=os.environ["ANTHROPIC_FOUNDRY_API_KEY"],
+        base_url=os.environ.get("ANTHROPIC_FOUNDRY_ENDPOINT",
+                                "https://nandamagatala-8810-resource.services.ai.azure.com/anthropic/v1"),
+        http_client=_httpx.Client(verify=False),
+    )
+
+
+@app.route("/linkedin/feed", methods=["POST"])
+def linkedin_feed():
+    """Weekly LinkedIn feed: pull the N most-recent summarized DB entries and have
+    the LLM group them into n_posts LinkedIn posts (same style/format as the DB
+    Explorer export). Returns a list of posts for copy-paste."""
+    from flask import jsonify
+
+    data = request.get_json(force=True) or {}
+    try:
+        n_db = max(1, min(100, int(data.get("n_db", 30))))
+    except (ValueError, TypeError):
+        n_db = 30
+    try:
+        n_posts = max(1, min(15, int(data.get("n_posts", 6))))
+    except (ValueError, TypeError):
+        n_posts = 6
+
+    entries = storage.list_recent(n_db)
+    if not entries:
+        return jsonify({"error": "No summarized entries found in the database yet."}), 400
+    n_posts = min(n_posts, len(entries))
+
+    # Enrich each entry with its full summary/tags/url (summary excluded from scan)
+    tbl = storage._dynamo_table()
+    items = []
+    for e in entries:
+        vid, det = e.get("video_id", ""), e.get("detail", "high")
+        full = tbl.get_item(Key={"video_id": vid, "detail": det}).get("Item", {}) if vid else {}
+        items.append({
+            "title":   e.get("title", "Untitled"),
+            "author":  e.get("author") or e.get("channel", ""),
+            "tags":    list(full.get("tags", []) or e.get("tags", [])),
+            "url":     full.get("url", e.get("url", "")),
+            "summary": full.get("summary", ""),
+        })
+
+    # Same indexed digest shape as the DB Explorer export
+    digests = []
+    for i, it in enumerate(items, 1):
+        url_line = f"\nURL: {it['url']}" if it["url"] else ""
+        digests.append(
+            f"[{i}] {it['title']}\nAuthor: {it['author']}\n"
+            f"Tags: {', '.join(it['tags'])}{url_line}\nSummary: {(it['summary'] or '')[:400]}"
+        )
+    digest_block = "\n\n".join(digests)
+
+    prompt = (
+        f"You are a LinkedIn thought-leader writing posts based on {len(items)} articles/videos.\n\n"
+        f"Group the articles into exactly {n_posts} LinkedIn posts by theme (each article belongs to "
+        f"at most one post; each post covers a coherent theme drawn from its articles).\n\n"
+        f"Style for every post: Write a 'N things I learned about [topic] this week' post. Use numbered insights.\n\n"
+        f"Rules for each post:\n"
+        f"- Post body: max 3000 characters, professional but conversational tone\n"
+        f"- End with a thought-provoking question to drive engagement\n"
+        f"- Provide 5-8 relevant hashtags (no # prefix)\n\n"
+        f"Output EXACTLY this structure for each post and nothing else:\n"
+        f"===POST===\n"
+        f"<post body>\n"
+        f"---HASHTAGS---\n"
+        f"<one hashtag per line>\n"
+        f"---SOURCES---\n"
+        f"<comma-separated article numbers used in this post, e.g. 1,4,7>\n\n"
+        f"Articles:\n{digest_block}"
+    )
+
+    try:
+        client = _foundry_client()
+        model  = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-opus-4-8")
+        resp = client.messages.create(
+            model=model,
+            system="You write concise, high-signal LinkedIn posts. Follow the format exactly.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=min(8192, 1000 + n_posts * 900),
+        )
+        raw = resp.content[0].text.strip()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    posts = []
+    for block in (b.strip() for b in raw.split("===POST===") if b.strip()):
+        body, hashtags, src_idx = block, [], []
+        if "---HASHTAGS---" in body:
+            body, rest = body.split("---HASHTAGS---", 1)
+            tag_part, src_part = (rest.split("---SOURCES---", 1) + [""])[:2] \
+                if "---SOURCES---" in rest else (rest, "")
+            hashtags = [f"#{t.strip().lstrip('#')}" for t in tag_part.strip().splitlines() if t.strip()]
+        elif "---SOURCES---" in body:
+            body, src_part = body.split("---SOURCES---", 1)
+        else:
+            src_part = ""
+        for tok in src_part.replace("\n", ",").split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                src_idx.append(int(tok))
+        post_text = body.strip()
+
+        # Append the same 🔗 Sources block, built from the referenced article numbers
+        sources = []
+        for idx in src_idx:
+            if 1 <= idx <= len(items) and items[idx - 1]["url"]:
+                sources.append(f"[{idx}] {items[idx - 1]['title']}\n{items[idx - 1]['url']}")
+        if sources:
+            post_text = post_text + "\n\n\U0001f517 Sources:\n" + "\n\n".join(sources)
+
+        posts.append({"post_text": post_text, "hashtags": hashtags, "char_count": len(post_text)})
+
+    if not posts:
+        return jsonify({"error": "The model returned no parseable posts. Try again."}), 500
+    return jsonify({"posts": posts, "count": len(posts), "fetched": len(items)})
 
 
 @app.route("/mixer/videos")

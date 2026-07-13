@@ -350,3 +350,39 @@ def count_by_status(status):
         if not last:
             break
     return total
+
+
+def list_recent(limit=40):
+    """Most-recent summarized entries, newest first, deduped by video_id.
+
+    Excludes inbox candidates (status='inbox', which have no summary). `summary`
+    is left out of the projection — callers fetch it per row via get_item. Used
+    by the weekly LinkedIn feed generator."""
+    table = _dynamo_table()
+    rows  = []
+    last  = None
+    while True:
+        kwargs = {
+            "ProjectionExpression": ("video_id, detail, title, channel, author, "
+                                     "tags, searched_on, source_platform, #s, #u"),
+            "ExpressionAttributeNames": {"#s": "status", "#u": "url"},
+        }
+        if last:
+            kwargs["ExclusiveStartKey"] = last
+        resp = table.scan(**kwargs)
+        rows.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+    rows = [r for r in rows if r.get("status") != "inbox"]
+    rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+    seen, out = set(), []
+    for r in rows:
+        vid = r.get("video_id")
+        if vid in seen:
+            continue
+        seen.add(vid)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
