@@ -1020,6 +1020,66 @@ def _foundry_client():
     )
 
 
+def _append_sources(body, src_idx, items):
+    """Append the 🔗 Sources block for the given 1-based article indices."""
+    sources = []
+    for idx in src_idx:
+        if 1 <= idx <= len(items) and items[idx - 1]["url"]:
+            sources.append(f"[{idx}] {items[idx - 1]['title']}\n{items[idx - 1]['url']}")
+    if sources:
+        return body + "\n\n\U0001f517 Sources:\n" + "\n\n".join(sources)
+    return body
+
+
+def _verify_feed_sources(posts, items, client, model):
+    """Verification agent — guarantees every post has reference links.
+
+    Posts whose parsed source indices are empty/invalid are sent (with the
+    numbered article list) to a second LLM pass that maps each such post to the
+    articles it draws from; the returned indices fill in `src_idx`. Mutates
+    `posts` in place and never raises (best-effort repair)."""
+    import json as _json
+
+    def _valid(p):
+        return any(1 <= i <= len(items) and items[i - 1]["url"] for i in p["src_idx"])
+
+    missing = [i for i, p in enumerate(posts) if not _valid(p)]
+    if not missing:
+        return
+
+    article_list = "\n".join(f"[{j}] {it['title']}" for j, it in enumerate(items, 1))
+    blocks = "\n\n".join(f"POST {i + 1}:\n{posts[i]['body'][:1200]}" for i in missing)
+    prompt = (
+        f"Each LinkedIn post below was written from this numbered list of articles.\n\n"
+        f"Articles:\n{article_list}\n\n"
+        f"Posts:\n{blocks}\n\n"
+        f"For each post shown, identify which article numbers it draws from (at least one each). "
+        f'Return ONLY a JSON object mapping the post label to a list of article numbers, '
+        f'e.g. {{"POST 2": [3, 5], "POST 4": [1]}}. No prose.'
+    )
+    try:
+        resp = client.messages.create(
+            model=model,
+            system="You map LinkedIn posts to their source articles. Return JSON only.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600,
+        )
+        txt = resp.content[0].text.strip()
+        m = re.search(r"\{.*\}", txt, re.DOTALL)
+        mapping = _json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        print(f"[linkedin_feed] source-repair agent failed: {e}")
+        return
+
+    for i in missing:
+        nums = mapping.get(f"POST {i + 1}") or mapping.get(str(i + 1)) or []
+        idxs = [int(n) for n in nums
+                if isinstance(n, int) or (isinstance(n, str) and n.strip().isdigit())]
+        idxs = [n for n in idxs if 1 <= n <= len(items)]
+        if idxs:
+            posts[i]["src_idx"] = idxs
+
+
 @app.route("/linkedin/feed", methods=["POST"])
 def linkedin_feed():
     """Weekly LinkedIn feed: pull the N most-recent summarized DB entries and have
@@ -1068,20 +1128,22 @@ def linkedin_feed():
 
     prompt = (
         f"You are a LinkedIn thought-leader writing posts based on {len(items)} articles/videos.\n\n"
-        f"Group the articles into exactly {n_posts} LinkedIn posts by theme (each article belongs to "
-        f"at most one post; each post covers a coherent theme drawn from its articles).\n\n"
+        f"Group the articles into exactly {n_posts} LinkedIn posts by theme. Assign EVERY article "
+        f"(numbers 1-{len(items)}) to exactly one post — every article must appear in some post's "
+        f"sources, and no post may be left without at least one source article.\n\n"
         f"Style for every post: Write a 'N things I learned about [topic] this week' post. Use numbered insights.\n\n"
         f"Rules for each post:\n"
         f"- Post body: max 3000 characters, professional but conversational tone\n"
         f"- End with a thought-provoking question to drive engagement\n"
-        f"- Provide 5-8 relevant hashtags (no # prefix)\n\n"
+        f"- Provide 5-8 relevant hashtags (no # prefix)\n"
+        f"- MANDATORY: list the article numbers this post draws from. Never omit the ---SOURCES--- line.\n\n"
         f"Output EXACTLY this structure for each post and nothing else:\n"
         f"===POST===\n"
         f"<post body>\n"
         f"---HASHTAGS---\n"
         f"<one hashtag per line>\n"
         f"---SOURCES---\n"
-        f"<comma-separated article numbers used in this post, e.g. 1,4,7>\n\n"
+        f"<comma-separated article numbers used in this post, e.g. 1,4,7 — at least one, required>\n\n"
         f"Articles:\n{digest_block}"
     )
 
@@ -1100,7 +1162,7 @@ def linkedin_feed():
 
     posts = []
     for block in (b.strip() for b in raw.split("===POST===") if b.strip()):
-        body, hashtags, src_idx = block, [], []
+        body, hashtags, src_part = block, [], ""
         if "---HASHTAGS---" in body:
             body, rest = body.split("---HASHTAGS---", 1)
             tag_part, src_part = (rest.split("---SOURCES---", 1) + [""])[:2] \
@@ -1108,27 +1170,21 @@ def linkedin_feed():
             hashtags = [f"#{t.strip().lstrip('#')}" for t in tag_part.strip().splitlines() if t.strip()]
         elif "---SOURCES---" in body:
             body, src_part = body.split("---SOURCES---", 1)
-        else:
-            src_part = ""
-        for tok in src_part.replace("\n", ",").split(","):
-            tok = tok.strip()
-            if tok.isdigit():
-                src_idx.append(int(tok))
-        post_text = body.strip()
-
-        # Append the same 🔗 Sources block, built from the referenced article numbers
-        sources = []
-        for idx in src_idx:
-            if 1 <= idx <= len(items) and items[idx - 1]["url"]:
-                sources.append(f"[{idx}] {items[idx - 1]['title']}\n{items[idx - 1]['url']}")
-        if sources:
-            post_text = post_text + "\n\n\U0001f517 Sources:\n" + "\n\n".join(sources)
-
-        posts.append({"post_text": post_text, "hashtags": hashtags, "char_count": len(post_text)})
+        # Tolerant index extraction: handles "1,4,7", "[1] [4]", "1 and 4", etc.
+        src_idx = [int(n) for n in re.findall(r"\d+", src_part)]
+        posts.append({"body": body.strip(), "hashtags": hashtags, "src_idx": src_idx})
 
     if not posts:
         return jsonify({"error": "The model returned no parseable posts. Try again."}), 500
-    return jsonify({"posts": posts, "count": len(posts), "fetched": len(items)})
+
+    # Verification/repair agent: guarantee every post has reference links.
+    _verify_feed_sources(posts, items, client, model)
+
+    out = []
+    for p in posts:
+        post_text = _append_sources(p["body"], p["src_idx"], items)
+        out.append({"post_text": post_text, "hashtags": p["hashtags"], "char_count": len(post_text)})
+    return jsonify({"posts": out, "count": len(out), "fetched": len(items)})
 
 
 @app.route("/mixer/videos")
