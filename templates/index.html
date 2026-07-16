@@ -160,10 +160,10 @@
         <input type="text" name="custom" placeholder="comma-separated" value="{{ custom or '' }}">
       </label>
       <button type="submit" id="run-btn">{% if search_mode == 'linkedin' %}Search LinkedIn{% else %}Run summary{% endif %}</button>
-      {% if search_mode != 'linkedin' %}
       <button type="submit" id="collect-btn" formaction="/inbox/collect"
         style="background:#3ecf8e;color:#062;">📥 Collect to Inbox</button>
-      {% endif %}
+      <input type="hidden" name="source" id="collect-source"
+        value="{{ 'linkedin' if search_mode == 'linkedin' else 'youtube' }}">
     </div>
     <div class="hint" id="run-hint">
       {% if search_mode == 'linkedin' %}
@@ -335,6 +335,7 @@ function onSrcChange(which) {
 
   const li = liCb.checked;
   document.getElementById('main-form').action = li ? '/li-search/run' : '/run';
+  document.getElementById('collect-source').value = li ? 'linkedin' : 'youtube';
   document.getElementById('sort-wrap').style.display   = li ? 'none' : '';
   document.getElementById('adhoc-form').style.display  = li ? 'none' : '';
   document.getElementById('run-btn').textContent       = li ? 'Search LinkedIn' : 'Run summary';

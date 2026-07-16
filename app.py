@@ -260,7 +260,9 @@ def video_page(video_id):
 
 @app.route("/inbox/collect", methods=["POST"])
 def inbox_collect():
-    """Search the selected terms (no LLM) and drop each hit into the inbox."""
+    """Search the selected terms (no LLM) and drop each hit into the inbox.
+    Source-aware: YouTube videos or LinkedIn posts depending on the `source` field."""
+    source   = request.form.get("source", "youtube")
     selected = request.form.getlist("terms")
     custom = (request.form.get("custom") or "").strip()
     if custom:
@@ -268,8 +270,9 @@ def inbox_collect():
     if not selected:
         selected = search_terms.all_terms()
 
+    cap = 50 if source == "linkedin" else 15
     try:
-        max_results = max(1, min(15, int(request.form.get("max_results", DEFAULT_MAX))))
+        max_results = max(1, min(cap, int(request.form.get("max_results", DEFAULT_MAX))))
     except ValueError:
         max_results = DEFAULT_MAX
 
@@ -279,19 +282,48 @@ def inbox_collect():
         date_filter = DEFAULT_DATE_FILTER
 
     term_pairs = [(label, search_terms.build_query(label)) for label in selected]
+    added = skipped = 0
+
+    if source == "linkedin":
+        import linkedin_search as lis
+        results, errors = lis.run_topics(
+            term_pairs, max_results=max_results, date_filter=date_filter or "",
+        )
+        for label, bucket in results.items():
+            for p in bucket.get("results", []):
+                text = p.get("text", "") or ""
+                cand = {
+                    "id":          p.get("id", ""),
+                    "url":         p.get("url", ""),
+                    "title":       (text[:90] or p.get("author", "") or "LinkedIn post"),
+                    "channel":     p.get("author", ""),
+                    "author":      p.get("author", ""),
+                    "headline":    p.get("headline", ""),
+                    "views":       int(p.get("likes", 0) or 0),
+                    "date":        p.get("date", ""),
+                    "duration":    "",
+                    "thumbnail":   "",
+                    "description": text,          # full post text — used later to summarize
+                }
+                if not cand["id"]:
+                    continue
+                if storage.save_candidate(cand, search_term=label,
+                                          source_platform="linkedin_post", content_type="post"):
+                    added += 1
+                else:
+                    skipped += 1
+        return redirect(url_for("inbox_page", added=added, skipped=skipped))
+
+    # Default: YouTube
     results, videos_by_id, errors = summarizer.run_terms(
         term_pairs, max_results=max_results,
         date_filter=date_filter or None, sort_order=DEFAULT_SORT,
     )
-
-    # Map each video id back to the search-term label it surfaced under
     label_by_id = {}
     for label, buckets in results.items():
         for bucket in ("top", "trending"):
             for v in buckets.get(bucket, []):
                 label_by_id.setdefault(v["id"], label)
-
-    added = skipped = 0
     for vid, video in videos_by_id.items():
         if storage.save_candidate(video, search_term=label_by_id.get(vid, "")):
             added += 1
@@ -312,32 +344,58 @@ def inbox_page():
 @app.route("/inbox/approve", methods=["POST"])
 def inbox_approve():
     """Summarize an approved candidate at medium detail (synchronously) and move it
-    into the reading queue as unread. Depth can be changed later in Reading.
+    into the reading queue as unread. Reads the candidate row from DynamoDB and
+    summarizes via the right source path (YouTube transcript vs LinkedIn post text).
     On failure the row is left in the inbox."""
     from flask import jsonify
-    data = request.get_json(force=True) or {}
-    video = {
-        "id":          data.get("video_id", ""),
-        "url":         data.get("url", ""),
-        "title":       data.get("title", ""),
-        "channel":     data.get("channel", ""),
-        "views":       int(data.get("views", 0) or 0),
-        "date":        data.get("date", ""),
-        "duration":    data.get("duration", ""),
-        "thumbnail":   data.get("thumbnail", ""),
-        "description": data.get("description", ""),
-    }
-    detail = "medium"
-    result = summarizer.fetch_and_summarize(video, detail=detail)
+    data        = request.get_json(force=True) or {}
+    vid         = data.get("video_id", "")
+    cand_detail = data.get("detail", "medium")
+    detail      = "medium"
+
+    row = storage._dynamo_table().get_item(Key={"video_id": vid, "detail": cand_detail}).get("Item")
+    if not row:
+        return jsonify({"ok": False, "error": "Candidate not found"})
+    platform = row.get("source_platform", "youtube")
+
+    if platform == "linkedin_post":
+        import linkedin_search as lis
+        post = {
+            "text":     row.get("description", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "date":     row.get("date", ""),
+            "likes":    int(row.get("views", 0) or 0),
+            "comments": 0,
+        }
+        result = lis.summarize_post(post, detail=detail)
+        video = {
+            "id":       vid, "url": row.get("url", ""), "title": row.get("title", ""),
+            "channel":  row.get("author") or row.get("channel", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "views":    int(row.get("views", 0) or 0), "date": row.get("date", ""),
+            "duration": "", "thumbnail": "", "description": row.get("description", ""),
+        }
+        src_platform, ctype = "linkedin_post", "post"
+    else:
+        video = {
+            "id":          vid, "url": row.get("url", ""), "title": row.get("title", ""),
+            "channel":     row.get("channel", ""), "views": int(row.get("views", 0) or 0),
+            "date":        row.get("date", ""), "duration": row.get("duration", ""),
+            "thumbnail":   row.get("thumbnail", ""), "description": row.get("description", ""),
+        }
+        result = summarizer.fetch_and_summarize(video, detail=detail)
+        src_platform, ctype = "youtube", "video"
+
     if result.get("error") or not result.get("summary"):
         return jsonify({"ok": False, "error": result.get("error") or "No summary produced"})
-    result["search_term"] = data.get("search_term", "")
-    storage.save_result(video, detail, result, source_platform="youtube",
-                        content_type="video", status="approved", read=False)
-    # If the candidate was stored under a different detail (legacy rows), drop it
-    orig_detail = data.get("detail", detail)
-    if orig_detail and orig_detail != detail:
-        storage.delete_item(video["id"], orig_detail)
+    result["search_term"] = row.get("search_term", "")
+    storage.save_result(video, detail, result, source_platform=src_platform,
+                        content_type=ctype, status="approved", read=False)
+    # If the candidate was stored under a different detail, drop the stale row
+    if cand_detail and cand_detail != detail:
+        storage.delete_item(vid, cand_detail)
     return jsonify({"ok": True})
 
 
@@ -359,24 +417,47 @@ def reading_regenerate():
     if not row:
         return jsonify({"ok": False, "error": "Item not found"})
 
-    video = {
-        "id":          vid,
-        "url":         row.get("url", ""),
-        "title":       row.get("title", ""),
-        "channel":     row.get("channel", ""),
-        "views":       int(row.get("views", 0) or 0),
-        "date":        row.get("date", ""),
-        "duration":    row.get("duration", ""),
-        "thumbnail":   row.get("thumbnail", ""),
-        "description": row.get("description", ""),
-    }
-    result = summarizer.fetch_and_summarize(video, detail=new_detail)
+    platform = row.get("source_platform", "youtube")
+    if platform == "linkedin_post":
+        import linkedin_search as lis
+        video = {
+            "id":       vid, "url": row.get("url", ""), "title": row.get("title", ""),
+            "channel":  row.get("author") or row.get("channel", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "views":    int(row.get("views", 0) or 0), "date": row.get("date", ""),
+            "duration": "", "thumbnail": "", "description": row.get("description", ""),
+        }
+        post = {
+            "text":     row.get("transcript", "") or row.get("description", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "date":     row.get("date", ""),
+            "likes":    int(row.get("views", 0) or 0), "comments": 0,
+        }
+        result = lis.summarize_post(post, detail=new_detail)
+        src_platform, ctype = "linkedin_post", "post"
+    else:
+        video = {
+            "id":          vid,
+            "url":         row.get("url", ""),
+            "title":       row.get("title", ""),
+            "channel":     row.get("channel", ""),
+            "views":       int(row.get("views", 0) or 0),
+            "date":        row.get("date", ""),
+            "duration":    row.get("duration", ""),
+            "thumbnail":   row.get("thumbnail", ""),
+            "description": row.get("description", ""),
+        }
+        result = summarizer.fetch_and_summarize(video, detail=new_detail)
+        src_platform, ctype = "youtube", "video"
+
     if result.get("error") or not result.get("summary"):
         return jsonify({"ok": False, "error": result.get("error") or "No summary produced"})
     result["search_term"] = row.get("search_term", "")
     read_flag = bool(row.get("read", False))
-    storage.save_result(video, new_detail, result, source_platform="youtube",
-                        content_type="video", status="approved", read=read_flag)
+    storage.save_result(video, new_detail, result, source_platform=src_platform,
+                        content_type=ctype, status="approved", read=read_flag)
     if new_detail != old_detail:
         storage.delete_item(vid, old_detail)
     return jsonify({

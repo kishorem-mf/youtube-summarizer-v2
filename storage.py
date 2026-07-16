@@ -277,6 +277,11 @@ def save_candidate(video, detail="medium", *, search_term="",
         "usage_count":     0,
         "search_term":     search_term,
     }
+    # LinkedIn-post candidates carry author/headline (post text lives in description)
+    if video.get("author"):
+        item["author"] = video["author"]
+    if video.get("headline"):
+        item["headline"] = video["headline"]
     try:
         table.put_item(Item=item, ConditionExpression="attribute_not_exists(video_id)")
         return True
