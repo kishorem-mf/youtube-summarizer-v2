@@ -100,8 +100,13 @@ def create_search_term_gsi():
         time.sleep(5)
 
 
-def save_result(video, detail, result, *, source_platform="youtube", content_type="video"):
-    """Upsert a summary result into DynamoDB. Safe to call from a background thread."""
+def save_result(video, detail, result, *, source_platform="youtube", content_type="video",
+                status=None, read=None):
+    """Upsert a summary result into DynamoDB. Safe to call from a background thread.
+
+    status/read are optional lifecycle fields for the inbox workflow. When None
+    (the legacy default) the attributes are omitted, so callers like
+    /video_summary keep their original behaviour and stay out of inbox/reading."""
     if result.get("error") or not result.get("summary"):
         return
     table = _dynamo_table()
@@ -130,6 +135,15 @@ def save_result(video, detail, result, *, source_platform="youtube", content_typ
             "tags":            result.get("tags", []),
             "questions":       result.get("questions", []),
         }
+        if status is not None:
+            item["status"] = status
+        if read is not None:
+            item["read"] = read
+        # Keep thumbnail/description so reading-queue cards retain their preview
+        if video.get("thumbnail"):
+            item["thumbnail"] = video["thumbnail"]
+        if video.get("description"):
+            item["description"] = video["description"]
         # Sparse platform-specific fields
         if source_platform == "google_search":
             if video.get("domain"):
@@ -229,3 +243,151 @@ def backfill_source_platform(dry_run=False):
     action = "Would update" if dry_run else "Updated"
     print(f"[storage] backfill_source_platform: scanned={scanned}, {action}={updated}")
     return updated
+
+
+# ─────────────────────────────────────────────
+# Inbox / reading workflow  (status: inbox → approved; read flag)
+# ─────────────────────────────────────────────
+
+def save_candidate(video, detail="medium", *, search_term="",
+                   source_platform="youtube", content_type="video"):
+    """Write a search hit into the inbox as a summary-less candidate (status='inbox').
+
+    Guarded by attribute_not_exists(video_id) so it never clobbers an already
+    summarized/approved row and silently dedupes repeat collects. Returns True
+    if a new candidate was written, False if one already existed."""
+    from botocore.exceptions import ClientError
+    table = _dynamo_table()
+    item = {
+        "video_id":        video.get("id", ""),
+        "detail":          detail,
+        "title":           video.get("title", ""),
+        "channel":         video.get("channel", ""),
+        "views":           video.get("views", 0),
+        "date":            video.get("date", ""),
+        "duration":        video.get("duration", ""),
+        "url":             video.get("url", ""),
+        "thumbnail":       video.get("thumbnail", ""),
+        "description":     video.get("description", ""),
+        "searched_on":     datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "summary":         "",
+        "status":          "inbox",
+        "source_platform": source_platform,
+        "content_type":    content_type,
+        "usage_count":     0,
+        "search_term":     search_term,
+    }
+    # LinkedIn-post candidates carry author/headline (post text lives in description)
+    if video.get("author"):
+        item["author"] = video["author"]
+    if video.get("headline"):
+        item["headline"] = video["headline"]
+    try:
+        table.put_item(Item=item, ConditionExpression="attribute_not_exists(video_id)")
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        print(f"[storage] save_candidate error: {e}")
+        return False
+    except Exception as e:
+        print(f"[storage] save_candidate error: {e}")
+        return False
+
+
+def set_read(video_id, detail, read):
+    """Toggle the read/unread flag on a saved item."""
+    try:
+        _dynamo_table().update_item(
+            Key={"video_id": video_id, "detail": detail},
+            UpdateExpression="SET #r = :r",
+            ExpressionAttributeNames={"#r": "read"},
+            ExpressionAttributeValues={":r": bool(read)},
+        )
+    except Exception as e:
+        print(f"[storage] set_read error: {e}")
+
+
+def delete_item(video_id, detail):
+    """Hard-delete a single item (used when declining an inbox candidate)."""
+    try:
+        _dynamo_table().delete_item(Key={"video_id": video_id, "detail": detail})
+    except Exception as e:
+        print(f"[storage] delete_item error: {e}")
+
+
+def list_by_status(status, limit=200):
+    """Return items with the given status, newest first. Summary is dropped from
+    each row (reading page lazy-loads it via /dynamo/item)."""
+    from boto3.dynamodb.conditions import Attr
+    table = _dynamo_table()
+    rows  = []
+    last  = None
+    while True:
+        kwargs = {"FilterExpression": Attr("status").eq(status)}
+        if last:
+            kwargs["ExclusiveStartKey"] = last
+        resp = table.scan(**kwargs)
+        for it in resp.get("Items", []):
+            it.pop("summary", None)
+            it.pop("transcript", None)
+            rows.append(it)
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+    rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+    return rows[:limit]
+
+
+def count_by_status(status):
+    """Count items with the given status (for nav badges)."""
+    from boto3.dynamodb.conditions import Attr
+    table = _dynamo_table()
+    total = 0
+    last  = None
+    while True:
+        kwargs = {"FilterExpression": Attr("status").eq(status), "Select": "COUNT"}
+        if last:
+            kwargs["ExclusiveStartKey"] = last
+        resp   = table.scan(**kwargs)
+        total += resp.get("Count", 0)
+        last   = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+    return total
+
+
+def list_recent(limit=40):
+    """Most-recent summarized entries, newest first, deduped by video_id.
+
+    Excludes inbox candidates (status='inbox', which have no summary). `summary`
+    is left out of the projection — callers fetch it per row via get_item. Used
+    by the weekly LinkedIn feed generator."""
+    table = _dynamo_table()
+    rows  = []
+    last  = None
+    while True:
+        kwargs = {
+            "ProjectionExpression": ("video_id, detail, title, channel, author, "
+                                     "tags, searched_on, source_platform, #s, #u"),
+            "ExpressionAttributeNames": {"#s": "status", "#u": "url"},
+        }
+        if last:
+            kwargs["ExclusiveStartKey"] = last
+        resp = table.scan(**kwargs)
+        rows.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+    rows = [r for r in rows if r.get("status") != "inbox"]
+    rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+    seen, out = set(), []
+    for r in rows:
+        vid = r.get("video_id")
+        if vid in seen:
+            continue
+        seen.add(vid)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out

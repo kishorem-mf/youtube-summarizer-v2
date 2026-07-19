@@ -131,6 +131,33 @@ def _yt_api_get(url, params):
     return json.loads(resp.read())
 
 
+_EN_STOPWORDS = {
+    "the", "and", "to", "of", "a", "in", "is", "for", "on", "with", "this",
+    "that", "it", "as", "are", "we", "you", "your", "our", "how", "what", "why",
+}
+
+
+def _looks_english(text: str) -> bool:
+    """Best-effort English check, no external deps.
+
+    Rejects text dominated by non-Latin scripts (CJK, Arabic, Cyrillic,
+    Devanagari…) and longer Latin text that lacks common English stopwords
+    (filters Spanish/French/German/etc.). Short/empty text is kept to avoid
+    over-filtering.
+    """
+    if not text:
+        return True
+    letters = [c for c in text if c.isalpha()]
+    if letters:
+        non_latin = sum(1 for c in letters if ord(c) > 0x024F)
+        if non_latin / len(letters) > 0.20:
+            return False
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if len(words) >= 12:
+        return sum(1 for w in words if w in _EN_STOPWORDS) >= 2
+    return True
+
+
 def _search_yt_api(keyword, max_results=6, date_filter=None, sort_order="relevance"):
     """Search via YouTube Data API v3 — returns full metadata including dates."""
     params = {
@@ -140,6 +167,7 @@ def _search_yt_api(keyword, max_results=6, date_filter=None, sort_order="relevan
         "maxResults": min(max_results, 50),
         "order": _SORT_MAP.get(sort_order, "relevance"),
         "videoDuration": "medium",   # excludes Shorts (<4 min) and very long (>20 min) — use 'any' for all
+        "relevanceLanguage": "en",   # bias results toward English-language videos
         "key": _YT_API_KEY,
     }
     # Add date filter if specified
@@ -260,6 +288,9 @@ def _search_ytdlp(keyword, max_results=6, date_filter=None, sort_order="relevanc
             continue
         dur_s = data.get("duration") or 0
         if 0 < dur_s < 61:
+            continue
+        # English-only: drop videos with clearly non-English titles
+        if not _looks_english(data.get("title") or ""):
             continue
         ts = data.get("timestamp") or data.get("release_timestamp")
         if cutoff:
@@ -425,6 +456,39 @@ def fetch_and_summarize(video, detail=DEFAULT_DETAIL):
     }
 
 
+def _fetch_video_meta_api(vid):
+    """Fetch single-video metadata via the YouTube Data API. Returns {} on failure."""
+    if not _YT_API_KEY:
+        return {}
+    try:
+        data = _yt_api_get(_YT_VIDEOS_URL, {
+            "part": "snippet,statistics,contentDetails",
+            "id":   vid,
+            "key":  _YT_API_KEY,
+        })
+        items = data.get("items", [])
+        if not items:
+            return {}
+        it    = items[0]
+        snip  = it.get("snippet", {})
+        stats = it.get("statistics", {})
+        dur_iso = it.get("contentDetails", {}).get("duration", "")
+        thumb = (snip.get("thumbnails", {}).get("high", {}).get("url")
+                 or snip.get("thumbnails", {}).get("medium", {}).get("url")
+                 or snip.get("thumbnails", {}).get("default", {}).get("url") or "")
+        return {
+            "title":           snip.get("title", ""),
+            "channel":         snip.get("channelTitle", ""),
+            "views":           int(stats.get("viewCount", 0) or 0),
+            "date":            (snip.get("publishedAt") or "")[:10],
+            "duration":        _parse_iso_duration(dur_iso),
+            "durationMinutes": round(_iso_duration_secs(dur_iso) / 60),
+            "thumbnail":       thumb,
+        }
+    except Exception:
+        return {}
+
+
 def fetch_transcript_full(url):
     """Fetch transcript + metadata for ad-hoc single-video tool.
 
@@ -434,6 +498,8 @@ def fetch_transcript_full(url):
     out = {
         "transcript": "", "wordCount": 0, "durationMinutes": 0,
         "language": "", "videoId": "", "status": "", "error": "",
+        "title": "", "channel": "", "views": 0, "date": "",
+        "duration": "", "thumbnail": "",
     }
     vid = _extract_vid(url)
     if not vid:
@@ -451,18 +517,32 @@ def fetch_transcript_full(url):
     out["wordCount"] = len(text.split())
     out["status"] = "ok"
 
-    # Estimate duration from yt-dlp (best effort, non-blocking)
-    try:
-        proc = subprocess.run(
-            _YTDLP + ["--dump-json", "--quiet", "--no-warnings",
-                      "--skip-download", f"https://www.youtube.com/watch?v={vid}"],
-            capture_output=True, text=True, timeout=30,
-        )
-        meta = json.loads(proc.stdout.strip())
-        dur_s = meta.get("duration") or 0
-        out["durationMinutes"] = round(dur_s / 60)
-    except Exception:
-        out["durationMinutes"] = round(out["wordCount"] / 130)  # ~130 wpm fallback
+    # Real video metadata: prefer the YouTube Data API (reliable), fall back to
+    # yt-dlp, then to a word-count-based duration estimate.
+    meta = _fetch_video_meta_api(vid)
+    if meta:
+        for k in ("title", "channel", "views", "date", "duration", "thumbnail"):
+            if meta.get(k):
+                out[k] = meta[k]
+        out["durationMinutes"] = meta.get("durationMinutes") or round(out["wordCount"] / 130)
+    else:
+        try:
+            proc = subprocess.run(
+                _YTDLP + ["--dump-json", "--quiet", "--no-warnings",
+                          "--skip-download", f"https://www.youtube.com/watch?v={vid}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            m = json.loads(proc.stdout.strip())
+            dur_s = m.get("duration") or 0
+            out["durationMinutes"] = round(dur_s / 60)
+            out["duration"]  = _fmt_duration(dur_s)
+            out["title"]     = m.get("title") or ""
+            out["channel"]   = m.get("channel") or m.get("uploader") or ""
+            out["views"]     = int(m.get("view_count") or 0)
+            out["date"]      = _fmt_date(m.get("upload_date"), m.get("timestamp") or m.get("release_timestamp"))
+            out["thumbnail"] = _best_thumbnail(m)
+        except Exception:
+            out["durationMinutes"] = round(out["wordCount"] / 130)  # ~130 wpm fallback
 
     return out
 
@@ -479,23 +559,28 @@ SYSTEM_PROMPT = (
     "information is thin, say so briefly rather than padding."
 )
 
+# char_limit = max transcript chars fed to the LLM. Set high enough to cover
+# full transcripts (Opus 4.8 has a 200K-token context; ~200K chars ≈ 50K tokens),
+# so long videos aren't silently truncated mid-transcript. Only the output length
+# (max_tokens) and instruction differ by detail level.
+_CHAR_LIMIT = 200_000
 DETAIL_SPECS = {
     "low": (
         "Output a one-sentence TL;DR, then 2-3 short bullet points of the most "
         "important takeaways.",
-        320, 6000,
+        320, _CHAR_LIMIT,
     ),
     "medium": (
         "Output a one-sentence TL;DR, then 4-6 bullet points capturing the key "
         "concrete takeaways with specifics.",
-        550, 9000,
+        550, _CHAR_LIMIT,
     ),
     "high": (
         "Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering "
         "all key concepts, examples, numbers, tools/products named, and "
         "actionable takeaways. Group bullets under short bold sub-headings when "
         "the content has distinct themes.",
-        1100, 16000,
+        2000, _CHAR_LIMIT,
     ),
 }
 DEFAULT_DETAIL = "medium"
@@ -578,7 +663,7 @@ def summarize_video(video, source_text, detail=DEFAULT_DETAIL, word_count=0):
             messages=[
                 {"role": "user", "content": user},
             ],
-            max_tokens=max_tokens + 200,
+            max_tokens=max_tokens + 400,
         )
         return _split_questions(resp.content[0].text.strip())
     except Exception as e:
@@ -650,16 +735,30 @@ def summarize_url(url, detail=DEFAULT_DETAIL):
         "durationMinutes": tx.get("durationMinutes", 0),
         "language": tx.get("language", ""),
         "transcript": tx.get("transcript", ""),
+        "title": tx.get("title", "") or f"Video {vid}",
+        "channel": tx.get("channel", ""),
+        "views": tx.get("views", 0),
+        "date": tx.get("date", ""),
+        "duration": tx.get("duration", "") or f"{tx.get('durationMinutes', 0)} min",
+        "thumbnail": tx.get("thumbnail", ""),
         "summary": "",
+        "tags": [],
+        "questions": [],
         "error": "",
     }
     if not result["transcript"]:
         result["error"] = tx.get("error") or "No transcript available for this video."
         return result
 
-    pseudo = {
-        "title": f"Video {vid}", "channel": "", "views": 0,
-        "date": "", "duration": f"{result['durationMinutes']} min",
+    video = {
+        "title":    result["title"], "channel": result["channel"],
+        "views":    result["views"], "date": result["date"],
+        "duration": result["duration"],
     }
-    result["summary"] = summarize_video(pseudo, result["transcript"], detail=detail)
+    # summarize_video returns (summary, questions) — unpack, don't store the tuple
+    summary, questions = summarize_video(video, result["transcript"], detail=detail,
+                                         word_count=result["wordCount"])
+    result["summary"]   = summary
+    result["questions"] = questions
+    result["tags"]      = _generate_tags(summary)
     return result

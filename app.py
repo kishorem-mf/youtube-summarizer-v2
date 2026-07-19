@@ -35,6 +35,11 @@ DEFAULT_MAX = int(os.environ.get("DEFAULT_MAX_RESULTS", "6"))
 # survives the redirect to the post detail page without URL-encoding it.
 _li_post_cache: dict = {}
 
+# In-process cache for ad-hoc research results (keyed by video id) so the
+# "Save to Reading" button can persist the already-computed summary without
+# round-tripping the full transcript through the form.
+_adhoc_cache: dict = {}
+
 # Upload-date windows offered in the UI -> yt-dlp dateFilter values.
 DATE_WINDOWS = [
     ("", "Any time"),
@@ -62,12 +67,48 @@ os.makedirs(OUTPUTS, exist_ok=True)
 
 @app.template_filter("mdlite")
 def mdlite(text):
-    """Render the LLM's lightweight markdown (just **bold**) as HTML, escaping
-    everything else. Newlines are preserved by the CSS (white-space:pre-wrap)."""
+    """Render the LLM's lightweight markdown as safe HTML: # headings,
+    - / * / • and 1. list items, and **bold**. Everything else is escaped."""
     from markupsafe import escape, Markup
-    esc = str(escape(text or ""))
-    esc = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
-    return Markup(esc)
+
+    def inline(s):
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", str(escape(s)))
+
+    html, list_type = [], None
+
+    def close_list():
+        nonlocal list_type
+        if list_type:
+            html.append(f"</{list_type}>")
+            list_type = None
+
+    for raw in str(text or "").split("\n"):
+        line = raw.strip()
+        if not line:
+            close_list()
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            close_list()
+            level = min(len(m.group(1)) + 2, 6)   # '#' -> <h3>
+            html.append(f"<h{level}>{inline(m.group(2))}</h{level}>")
+            continue
+        m = re.match(r"^[-*•]\s+(.*)$", line)
+        if m:
+            if list_type != "ul":
+                close_list(); html.append("<ul>"); list_type = "ul"
+            html.append(f"<li>{inline(m.group(1))}</li>")
+            continue
+        m = re.match(r"^\d+[.)]\s+(.*)$", line)
+        if m:
+            if list_type != "ol":
+                close_list(); html.append("<ol>"); list_type = "ol"
+            html.append(f"<li>{inline(m.group(1))}</li>")
+            continue
+        close_list()
+        html.append(f"<p>{inline(line)}</p>")
+    close_list()
+    return Markup("".join(html))
 
 
 @app.route("/", methods=["GET"])
@@ -213,6 +254,254 @@ def video_page(video_id):
     )
 
 
+# ─────────────────────────────────────────────
+# Agentic inbox: collect search hits → review → approve (summarize) → reading queue
+# ─────────────────────────────────────────────
+
+@app.route("/inbox/collect", methods=["POST"])
+def inbox_collect():
+    """Search the selected terms (no LLM) and drop each hit into the inbox.
+    Source-aware: YouTube videos or LinkedIn posts depending on the `source` field."""
+    source   = request.form.get("source", "youtube")
+    selected = request.form.getlist("terms")
+    custom = (request.form.get("custom") or "").strip()
+    if custom:
+        selected = selected + [t.strip() for t in custom.split(",") if t.strip()]
+    if not selected:
+        selected = search_terms.all_terms()
+
+    cap = 50 if source == "linkedin" else 15
+    try:
+        max_results = max(1, min(cap, int(request.form.get("max_results", DEFAULT_MAX))))
+    except ValueError:
+        max_results = DEFAULT_MAX
+
+    valid_dates = {v for v, _ in DATE_WINDOWS}
+    date_filter = request.form.get("date_filter", DEFAULT_DATE_FILTER)
+    if date_filter not in valid_dates:
+        date_filter = DEFAULT_DATE_FILTER
+
+    term_pairs = [(label, search_terms.build_query(label)) for label in selected]
+    added = skipped = 0
+
+    if source == "linkedin":
+        import linkedin_search as lis
+        results, errors = lis.run_topics(
+            term_pairs, max_results=max_results, date_filter=date_filter or "",
+        )
+        for label, bucket in results.items():
+            for p in bucket.get("results", []):
+                text = p.get("text", "") or ""
+                cand = {
+                    "id":          p.get("id", ""),
+                    "url":         p.get("url", ""),
+                    "title":       (text[:90] or p.get("author", "") or "LinkedIn post"),
+                    "channel":     p.get("author", ""),
+                    "author":      p.get("author", ""),
+                    "headline":    p.get("headline", ""),
+                    "views":       int(p.get("likes", 0) or 0),
+                    "date":        p.get("date", ""),
+                    "duration":    "",
+                    "thumbnail":   "",
+                    "description": text,          # full post text — used later to summarize
+                }
+                if not cand["id"]:
+                    continue
+                if storage.save_candidate(cand, search_term=label,
+                                          source_platform="linkedin_post", content_type="post"):
+                    added += 1
+                else:
+                    skipped += 1
+        return redirect(url_for("inbox_page", added=added, skipped=skipped))
+
+    # Default: YouTube
+    results, videos_by_id, errors = summarizer.run_terms(
+        term_pairs, max_results=max_results,
+        date_filter=date_filter or None, sort_order=DEFAULT_SORT,
+    )
+    label_by_id = {}
+    for label, buckets in results.items():
+        for bucket in ("top", "trending"):
+            for v in buckets.get(bucket, []):
+                label_by_id.setdefault(v["id"], label)
+    for vid, video in videos_by_id.items():
+        if storage.save_candidate(video, search_term=label_by_id.get(vid, "")):
+            added += 1
+        else:
+            skipped += 1
+    return redirect(url_for("inbox_page", added=added, skipped=skipped))
+
+
+@app.route("/inbox")
+def inbox_page():
+    rows = storage.list_by_status("inbox")
+    return render_template(
+        "inbox.html", active_tab="inbox", rows=rows,
+        added=request.args.get("added"), skipped=request.args.get("skipped"),
+    )
+
+
+@app.route("/inbox/approve", methods=["POST"])
+def inbox_approve():
+    """Summarize an approved candidate at medium detail (synchronously) and move it
+    into the reading queue as unread. Reads the candidate row from DynamoDB and
+    summarizes via the right source path (YouTube transcript vs LinkedIn post text).
+    On failure the row is left in the inbox."""
+    from flask import jsonify
+    data        = request.get_json(force=True) or {}
+    vid         = data.get("video_id", "")
+    cand_detail = data.get("detail", "medium")
+    detail      = "medium"
+
+    row = storage._dynamo_table().get_item(Key={"video_id": vid, "detail": cand_detail}).get("Item")
+    if not row:
+        return jsonify({"ok": False, "error": "Candidate not found"})
+    platform = row.get("source_platform", "youtube")
+
+    if platform == "linkedin_post":
+        import linkedin_search as lis
+        post = {
+            "text":     row.get("description", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "date":     row.get("date", ""),
+            "likes":    int(row.get("views", 0) or 0),
+            "comments": 0,
+        }
+        result = lis.summarize_post(post, detail=detail)
+        video = {
+            "id":       vid, "url": row.get("url", ""), "title": row.get("title", ""),
+            "channel":  row.get("author") or row.get("channel", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "views":    int(row.get("views", 0) or 0), "date": row.get("date", ""),
+            "duration": "", "thumbnail": "", "description": row.get("description", ""),
+        }
+        src_platform, ctype = "linkedin_post", "post"
+    else:
+        video = {
+            "id":          vid, "url": row.get("url", ""), "title": row.get("title", ""),
+            "channel":     row.get("channel", ""), "views": int(row.get("views", 0) or 0),
+            "date":        row.get("date", ""), "duration": row.get("duration", ""),
+            "thumbnail":   row.get("thumbnail", ""), "description": row.get("description", ""),
+        }
+        result = summarizer.fetch_and_summarize(video, detail=detail)
+        src_platform, ctype = "youtube", "video"
+
+    if result.get("error") or not result.get("summary"):
+        return jsonify({"ok": False, "error": result.get("error") or "No summary produced"})
+    result["search_term"] = row.get("search_term", "")
+    storage.save_result(video, detail, result, source_platform=src_platform,
+                        content_type=ctype, status="approved", read=False)
+    # If the candidate was stored under a different detail, drop the stale row
+    if cand_detail and cand_detail != detail:
+        storage.delete_item(vid, cand_detail)
+    return jsonify({"ok": True})
+
+
+@app.route("/reading/regenerate", methods=["POST"])
+def reading_regenerate():
+    """Re-summarize a reading item at a new detail level and persist it, replacing
+    the old-detail row so there stays one entry per video. Preserves the read flag."""
+    from flask import jsonify
+    data       = request.get_json(force=True) or {}
+    vid        = data.get("video_id", "")
+    old_detail = data.get("detail", "medium")
+    new_detail = data.get("new_detail", "medium")
+    if new_detail not in {"low", "medium", "high"}:
+        return jsonify({"ok": False, "error": "Invalid detail level"})
+
+    row = storage._dynamo_table().get_item(
+        Key={"video_id": vid, "detail": old_detail}
+    ).get("Item")
+    if not row:
+        return jsonify({"ok": False, "error": "Item not found"})
+
+    platform = row.get("source_platform", "youtube")
+    if platform == "linkedin_post":
+        import linkedin_search as lis
+        video = {
+            "id":       vid, "url": row.get("url", ""), "title": row.get("title", ""),
+            "channel":  row.get("author") or row.get("channel", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "views":    int(row.get("views", 0) or 0), "date": row.get("date", ""),
+            "duration": "", "thumbnail": "", "description": row.get("description", ""),
+        }
+        post = {
+            "text":     row.get("transcript", "") or row.get("description", ""),
+            "author":   row.get("author") or row.get("channel", ""),
+            "headline": row.get("headline", ""),
+            "date":     row.get("date", ""),
+            "likes":    int(row.get("views", 0) or 0), "comments": 0,
+        }
+        result = lis.summarize_post(post, detail=new_detail)
+        src_platform, ctype = "linkedin_post", "post"
+    else:
+        video = {
+            "id":          vid,
+            "url":         row.get("url", ""),
+            "title":       row.get("title", ""),
+            "channel":     row.get("channel", ""),
+            "views":       int(row.get("views", 0) or 0),
+            "date":        row.get("date", ""),
+            "duration":    row.get("duration", ""),
+            "thumbnail":   row.get("thumbnail", ""),
+            "description": row.get("description", ""),
+        }
+        result = summarizer.fetch_and_summarize(video, detail=new_detail)
+        src_platform, ctype = "youtube", "video"
+
+    if result.get("error") or not result.get("summary"):
+        return jsonify({"ok": False, "error": result.get("error") or "No summary produced"})
+    result["search_term"] = row.get("search_term", "")
+    read_flag = bool(row.get("read", False))
+    storage.save_result(video, new_detail, result, source_platform=src_platform,
+                        content_type=ctype, status="approved", read=read_flag)
+    if new_detail != old_detail:
+        storage.delete_item(vid, old_detail)
+    return jsonify({
+        "ok":        True,
+        "detail":    new_detail,
+        "summary":   result.get("summary", ""),
+        "questions": result.get("questions", []),
+    })
+
+
+@app.route("/inbox/decline", methods=["POST"])
+def inbox_decline():
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    storage.delete_item(data.get("video_id", ""), data.get("detail", "high"))
+    return jsonify({"ok": True})
+
+
+@app.route("/reading")
+def reading_page():
+    # Reading queue = unread approved items only. Read items stay in DynamoDB
+    # (status="approved", read=true) and remain visible in DB Explorer.
+    rows = [r for r in storage.list_by_status("approved") if not r.get("read")]
+    return render_template("reading.html", active_tab="reading", rows=rows)
+
+
+@app.route("/reading/toggle-read", methods=["POST"])
+def reading_toggle_read():
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    storage.set_read(data.get("video_id", ""), data.get("detail", "high"), bool(data.get("read")))
+    return jsonify({"ok": True})
+
+
+@app.route("/inbox/counts")
+def inbox_counts():
+    from flask import jsonify
+    unread_approved = sum(1 for r in storage.list_by_status("approved") if not r.get("read"))
+    return jsonify({
+        "inbox":   storage.count_by_status("inbox"),
+        "reading": unread_approved,
+    })
+
+
 @app.route("/transcript", methods=["GET", "POST"])
 def transcript():
     """Ad-hoc: one YouTube URL -> transcript + summary at the chosen detail."""
@@ -230,6 +519,10 @@ def transcript():
     else:
         tr = summarizer.summarize_url(url, detail=detail)
     tr["detail"] = detail
+
+    # Cache the computed result so /adhoc/save can persist it without re-summarizing
+    if not tr.get("error") and tr.get("summary") and tr.get("videoId"):
+        _adhoc_cache[tr["videoId"]] = tr
 
     return render_template(
         "index.html",
@@ -249,13 +542,57 @@ def transcript():
     )
 
 
+@app.route("/adhoc/save", methods=["POST"])
+def adhoc_save():
+    """Persist an ad-hoc research result (already summarized) as an approved,
+    unread Reading-queue item — reusing the summary/tags/questions + real video
+    metadata. Falls back to recomputing if the in-process cache has expired."""
+    vid    = (request.form.get("video_id") or "").strip()
+    detail = request.form.get("detail", DEFAULT_DETAIL)
+    if not vid:
+        return redirect(url_for("index"))
+
+    tr = _adhoc_cache.get(vid)
+    if not tr:  # cache miss (e.g. server restarted) — recompute from the URL
+        tr = summarizer.summarize_url(f"https://www.youtube.com/watch?v={vid}", detail=detail)
+        tr["detail"] = detail
+    if tr.get("error") or not tr.get("summary"):
+        return redirect(url_for("index"))
+
+    video = {
+        "id":          vid,
+        "url":         tr.get("url", f"https://www.youtube.com/watch?v={vid}"),
+        "title":       tr.get("title", ""),
+        "channel":     tr.get("channel", ""),
+        "views":       int(tr.get("views", 0) or 0),
+        "date":        tr.get("date", ""),
+        "duration":    tr.get("duration", ""),
+        "thumbnail":   tr.get("thumbnail", ""),
+        "description": "",
+    }
+    result = {
+        "transcript":  tr.get("transcript", ""),
+        "summary":     tr.get("summary", ""),
+        "tags":        tr.get("tags", []),
+        "questions":   tr.get("questions", []),
+        "source":      "youtube-transcript-api",
+        "wordCount":   tr.get("wordCount", 0),
+        "language":    tr.get("language", ""),
+        "search_term": "ad-hoc research",
+    }
+    storage.save_result(video, tr.get("detail", detail), result,
+                        source_platform="youtube", content_type="video",
+                        status="approved", read=False)
+    return redirect(url_for("reading_page"))
+
+
 @app.route("/dynamo", methods=["GET", "POST"])
 def dynamo_explorer():
     from flask import jsonify
     from boto3.dynamodb.conditions import Key as DKey
 
     ctx = dict(rows=None, query_type="get_item", video_id="", detail="",
-               limit="20", search_term="", tag="", platform="",
+               limit="20", search_term=[], tag=[], platform="",
                query_label="", message=None, message_type=None)
 
     if request.method == "GET":
@@ -265,14 +602,25 @@ def dynamo_explorer():
     qt          = request.form.get("query_type", "get_item")
     video_id    = request.form.get("video_id", "").strip()
     detail      = request.form.get("detail", "").strip()
-    search_term = request.form.get("search_term", "").strip()
-    tag         = request.form.get("tag", "").strip()
-    platform    = request.form.get("platform", "").strip()
-    limit       = max(1, min(100, int(request.form.get("limit", "20") or "20")))
+    search_terms = [s.strip() for s in request.form.getlist("search_term") if s.strip()]
+    tags         = [t.strip() for t in request.form.getlist("tag") if t.strip()]
+    search_term  = search_terms  # keep ctx key name for template compatibility
+    tag          = tags
+    platform     = request.form.get("platform", "").strip()
+    limit        = max(1, min(100, int(request.form.get("limit", "20") or "20")))
     ctx.update(query_type=qt, video_id=video_id, detail=detail,
-               search_term=search_term, tag=tag, platform=platform, limit=str(limit))
+               search_term=search_terms, tag=tags, platform=platform, limit=str(limit))
 
     table = storage._dynamo_table()
+
+    # Projection for all scan queries — excludes `summary` (largest field, lazy-loaded on expand)
+    # `url` is a DynamoDB reserved word so it must be aliased via ExpressionAttributeNames
+    _SCAN_PROJ = (
+        "video_id, detail, title, channel, author, search_term, "
+        "tags, searched_on, source_type, source_platform, "
+        "usage_count, word_count, questions, #url"
+    )
+    _SCAN_NAMES = {"#url": "url"}
 
     try:
         if qt == "get_item":
@@ -290,9 +638,17 @@ def dynamo_explorer():
                 ctx.update(rows=resp.get("Items", []), query_label=f"all details · {video_id}")
 
         elif qt == "scan_recent":
-            resp = table.scan(Limit=limit)
-            items = sorted(resp.get("Items", []), key=lambda x: x.get("searched_on", ""), reverse=True)
-            ctx.update(rows=items, query_label=f"scan · last {limit} items")
+            scan_kwargs = {"ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
+            all_rows = []
+            while True:
+                resp = table.scan(**scan_kwargs)
+                all_rows.extend(resp.get("Items", []))
+                lek = resp.get("LastEvaluatedKey")
+                if not lek:
+                    break
+                scan_kwargs["ExclusiveStartKey"] = lek
+            all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
+            ctx.update(rows=all_rows[:limit], query_label=f"scan · last {limit} items")
 
         elif qt == "delete_item":
             if not video_id or not detail:
@@ -304,13 +660,20 @@ def dynamo_explorer():
 
         elif qt == "by_topic":
             from boto3.dynamodb.conditions import Attr
-            if not search_term:
-                ctx.update(message="Topic (search_term) is required.", message_type="err", rows=[])
+            if not search_terms:
+                ctx.update(message="At least one Topic is required.", message_type="err", rows=[])
             else:
-                fe = Attr("search_term").eq(search_term)
-                if tag:
-                    fe = fe & Attr("tags").contains(tag)
-                scan_kwargs = {"FilterExpression": fe}
+                fe = None
+                for st in search_terms:
+                    c = Attr("search_term").eq(st)
+                    fe = c if fe is None else fe | c
+                if tags:
+                    tag_fe = None
+                    for tg in tags:
+                        c = Attr("tags").contains(tg)
+                        tag_fe = c if tag_fe is None else tag_fe | c
+                    fe = fe & tag_fe
+                scan_kwargs = {"FilterExpression": fe, "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -320,15 +683,19 @@ def dynamo_explorer():
                         break
                     scan_kwargs["ExclusiveStartKey"] = lek
                 all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
-                label = f"topic · {search_term}" + (f" + tag · {tag}" if tag else "")
+                label = "topic · " + ", ".join(search_terms) + ((" + tag · " + ", ".join(tags)) if tags else "")
                 ctx.update(rows=all_rows[:limit], query_label=label)
 
         elif qt == "by_tag":
             from boto3.dynamodb.conditions import Attr
-            if not tag:
-                ctx.update(message="Tag is required.", message_type="err", rows=[])
+            if not tags:
+                ctx.update(message="At least one Tag is required.", message_type="err", rows=[])
             else:
-                scan_kwargs = {"FilterExpression": Attr("tags").contains(tag)}
+                fe = None
+                for tg in tags:
+                    c = Attr("tags").contains(tg)
+                    fe = c if fe is None else fe | c
+                scan_kwargs = {"FilterExpression": fe, "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -338,7 +705,7 @@ def dynamo_explorer():
                         break
                     scan_kwargs["ExclusiveStartKey"] = lek
                 all_rows.sort(key=lambda x: x.get("searched_on", ""), reverse=True)
-                ctx.update(rows=all_rows[:limit], query_label=f"tag · {tag}")
+                ctx.update(rows=all_rows[:limit], query_label="tag · " + ", ".join(tags))
 
         elif qt == "by_platform":
             from boto3.dynamodb.conditions import Attr
@@ -346,7 +713,7 @@ def dynamo_explorer():
             if not platform:
                 ctx.update(message="Platform is required.", message_type="err", rows=[])
             else:
-                scan_kwargs = {"FilterExpression": Attr("source_platform").eq(platform)}
+                scan_kwargs = {"FilterExpression": Attr("source_platform").eq(platform), "ProjectionExpression": _SCAN_PROJ, "ExpressionAttributeNames": _SCAN_NAMES}
                 all_rows = []
                 while True:
                     resp = table.scan(**scan_kwargs)
@@ -406,6 +773,112 @@ def dynamo_filters():
                 for t, c in topic_tags.items()
             },
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/dynamo/item/<video_id>/<detail>")
+def dynamo_item_detail(video_id, detail):
+    """Return summary + questions for a single item — used by lazy expand in DB Explorer."""
+    from flask import jsonify
+    item = storage._dynamo_table().get_item(
+        Key={"video_id": video_id, "detail": detail}
+    ).get("Item")
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({
+        "summary":   item.get("summary", ""),
+        "questions": list(item.get("questions", [])),
+    })
+
+
+@app.route("/dynamo/export-linkedin", methods=["POST"])
+def dynamo_export_linkedin():
+    from flask import jsonify
+    import anthropic as _asdk, httpx as _httpx
+
+    data  = request.get_json(force=True) or {}
+    items = data.get("items", [])
+    style = data.get("style", "insights")
+
+    if not items:
+        return jsonify({"error": "No items selected"}), 400
+
+    # Fetch full summary from DynamoDB for each item (summary excluded from scan projection)
+    tbl = storage._dynamo_table()
+    enriched = []
+    for it in items:
+        vid, det = it.get("video_id", ""), it.get("detail", "high")
+        if vid:
+            full = tbl.get_item(Key={"video_id": vid, "detail": det}).get("Item", {})
+            it = dict(it, summary=full.get("summary", ""), tags=list(full.get("tags", [])),
+                      url=full.get("url", it.get("url", "")))
+        enriched.append(it)
+    items = enriched
+
+    digests = []
+    for i, it in enumerate(items, 1):
+        title   = it.get("title", "Untitled")
+        author  = it.get("author") or it.get("channel", "")
+        summary = (it.get("summary") or "")[:400]
+        tags    = ", ".join(it.get("tags", []))
+        url     = it.get("url", "")
+        url_line = f"\nURL: {url}" if url else ""
+        digests.append(f"[{i}] {title}\nAuthor: {author}\nTags: {tags}{url_line}\nSummary: {summary}")
+    digest_block = "\n\n".join(digests)
+
+    style_instructions = {
+        "insights": "Write a 'N things I learned about [topic] this week' post. Use numbered insights.",
+        "tips":     "Write a practical tips post. Each tip is actionable and specific.",
+        "thread":   "Write a LinkedIn thread-style post using 1/ 2/ 3/ numbering.",
+    }.get(style, "Write a LinkedIn post sharing key insights from these articles.")
+
+    prompt = (
+        f"You are a LinkedIn thought-leader writing a post based on {len(items)} articles/videos.\n\n"
+        f"Style: {style_instructions}\n\n"
+        f"Rules:\n"
+        f"- Post body: max 3000 characters, professional but conversational tone\n"
+        f"- End with a thought-provoking question to drive engagement\n"
+        f"- After the post, output exactly this delimiter on its own line: ---HASHTAGS---\n"
+        f"- Then output 5-8 relevant hashtags (no # prefix, one per line)\n\n"
+        f"Articles:\n{digest_block}"
+    )
+
+    _client = _asdk.Anthropic(
+        api_key=os.environ["ANTHROPIC_FOUNDRY_API_KEY"],
+        base_url=os.environ.get("ANTHROPIC_FOUNDRY_ENDPOINT",
+                                "https://nandamagatala-8810-resource.services.ai.azure.com/anthropic/v1"),
+        http_client=_httpx.Client(verify=False),
+    )
+    _model = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-opus-4-8")
+
+    try:
+        resp = _client.messages.create(
+            model=_model,
+            system="You write concise, high-signal LinkedIn posts. Follow the format exactly.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+        )
+        raw = resp.content[0].text.strip()
+        if "---HASHTAGS---" in raw:
+            post_part, tag_part = raw.split("---HASHTAGS---", 1)
+            post_text = post_part.strip()
+            hashtags  = [f"#{t.strip().lstrip('#')}" for t in tag_part.strip().splitlines() if t.strip()]
+        else:
+            post_text = raw
+            hashtags  = []
+
+        # Always append sources section with URLs for every item that has one
+        sources = []
+        for i, it in enumerate(items, 1):
+            url   = it.get("url", "").strip()
+            title = it.get("title", f"Article {i}")
+            if url:
+                sources.append(f"[{i}] {title}\n{url}")
+        if sources:
+            post_text = post_text + "\n\n\U0001f517 Sources:\n" + "\n\n".join(sources)
+
+        return jsonify({"post_text": post_text, "hashtags": hashtags, "char_count": len(post_text)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -614,6 +1087,185 @@ def linkedin_download():
         as_attachment=True,
         download_name=os.path.basename(matches[0]),
     )
+
+
+def _foundry_client():
+    """Anthropic client against the Azure AI Foundry endpoint — same config the
+    DB Explorer LinkedIn export uses."""
+    import anthropic as _asdk, httpx as _httpx
+    return _asdk.Anthropic(
+        api_key=os.environ["ANTHROPIC_FOUNDRY_API_KEY"],
+        base_url=os.environ.get("ANTHROPIC_FOUNDRY_ENDPOINT",
+                                "https://nandamagatala-8810-resource.services.ai.azure.com/anthropic/v1"),
+        http_client=_httpx.Client(verify=False),
+    )
+
+
+def _append_sources(body, src_idx, items):
+    """Append the 🔗 Sources block for the given 1-based article indices."""
+    sources = []
+    for idx in src_idx:
+        if 1 <= idx <= len(items) and items[idx - 1]["url"]:
+            sources.append(f"[{idx}] {items[idx - 1]['title']}\n{items[idx - 1]['url']}")
+    if sources:
+        return body + "\n\n\U0001f517 Sources:\n" + "\n\n".join(sources)
+    return body
+
+
+def _verify_feed_sources(posts, items, client, model):
+    """Verification agent — guarantees every post has reference links.
+
+    Posts whose parsed source indices are empty/invalid are sent (with the
+    numbered article list) to a second LLM pass that maps each such post to the
+    articles it draws from; the returned indices fill in `src_idx`. Mutates
+    `posts` in place and never raises (best-effort repair)."""
+    import json as _json
+
+    def _valid(p):
+        return any(1 <= i <= len(items) and items[i - 1]["url"] for i in p["src_idx"])
+
+    missing = [i for i, p in enumerate(posts) if not _valid(p)]
+    if not missing:
+        return
+
+    article_list = "\n".join(f"[{j}] {it['title']}" for j, it in enumerate(items, 1))
+    blocks = "\n\n".join(f"POST {i + 1}:\n{posts[i]['body'][:1200]}" for i in missing)
+    prompt = (
+        f"Each LinkedIn post below was written from this numbered list of articles.\n\n"
+        f"Articles:\n{article_list}\n\n"
+        f"Posts:\n{blocks}\n\n"
+        f"For each post shown, identify which article numbers it draws from (at least one each). "
+        f'Return ONLY a JSON object mapping the post label to a list of article numbers, '
+        f'e.g. {{"POST 2": [3, 5], "POST 4": [1]}}. No prose.'
+    )
+    try:
+        resp = client.messages.create(
+            model=model,
+            system="You map LinkedIn posts to their source articles. Return JSON only.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600,
+        )
+        txt = resp.content[0].text.strip()
+        m = re.search(r"\{.*\}", txt, re.DOTALL)
+        mapping = _json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        print(f"[linkedin_feed] source-repair agent failed: {e}")
+        return
+
+    for i in missing:
+        nums = mapping.get(f"POST {i + 1}") or mapping.get(str(i + 1)) or []
+        idxs = [int(n) for n in nums
+                if isinstance(n, int) or (isinstance(n, str) and n.strip().isdigit())]
+        idxs = [n for n in idxs if 1 <= n <= len(items)]
+        if idxs:
+            posts[i]["src_idx"] = idxs
+
+
+@app.route("/linkedin/feed", methods=["POST"])
+def linkedin_feed():
+    """Weekly LinkedIn feed: pull the N most-recent summarized DB entries and have
+    the LLM group them into n_posts LinkedIn posts (same style/format as the DB
+    Explorer export). Returns a list of posts for copy-paste."""
+    from flask import jsonify
+
+    data = request.get_json(force=True) or {}
+    try:
+        n_db = max(1, min(100, int(data.get("n_db", 30))))
+    except (ValueError, TypeError):
+        n_db = 30
+    try:
+        n_posts = max(1, min(15, int(data.get("n_posts", 6))))
+    except (ValueError, TypeError):
+        n_posts = 6
+
+    entries = storage.list_recent(n_db)
+    if not entries:
+        return jsonify({"error": "No summarized entries found in the database yet."}), 400
+    n_posts = min(n_posts, len(entries))
+
+    # Enrich each entry with its full summary/tags/url (summary excluded from scan)
+    tbl = storage._dynamo_table()
+    items = []
+    for e in entries:
+        vid, det = e.get("video_id", ""), e.get("detail", "high")
+        full = tbl.get_item(Key={"video_id": vid, "detail": det}).get("Item", {}) if vid else {}
+        items.append({
+            "title":   e.get("title", "Untitled"),
+            "author":  e.get("author") or e.get("channel", ""),
+            "tags":    list(full.get("tags", []) or e.get("tags", [])),
+            "url":     full.get("url", e.get("url", "")),
+            "summary": full.get("summary", ""),
+        })
+
+    # Same indexed digest shape as the DB Explorer export
+    digests = []
+    for i, it in enumerate(items, 1):
+        url_line = f"\nURL: {it['url']}" if it["url"] else ""
+        digests.append(
+            f"[{i}] {it['title']}\nAuthor: {it['author']}\n"
+            f"Tags: {', '.join(it['tags'])}{url_line}\nSummary: {(it['summary'] or '')[:400]}"
+        )
+    digest_block = "\n\n".join(digests)
+
+    prompt = (
+        f"You are a LinkedIn thought-leader writing posts based on {len(items)} articles/videos.\n\n"
+        f"Group the articles into exactly {n_posts} LinkedIn posts by theme. Assign EVERY article "
+        f"(numbers 1-{len(items)}) to exactly one post — every article must appear in some post's "
+        f"sources, and no post may be left without at least one source article.\n\n"
+        f"Style for every post: Write a 'N things I learned about [topic] this week' post. Use numbered insights.\n\n"
+        f"Rules for each post:\n"
+        f"- Post body: max 3000 characters, professional but conversational tone\n"
+        f"- End with a thought-provoking question to drive engagement\n"
+        f"- Provide 5-8 relevant hashtags (no # prefix)\n"
+        f"- MANDATORY: list the article numbers this post draws from. Never omit the ---SOURCES--- line.\n\n"
+        f"Output EXACTLY this structure for each post and nothing else:\n"
+        f"===POST===\n"
+        f"<post body>\n"
+        f"---HASHTAGS---\n"
+        f"<one hashtag per line>\n"
+        f"---SOURCES---\n"
+        f"<comma-separated article numbers used in this post, e.g. 1,4,7 — at least one, required>\n\n"
+        f"Articles:\n{digest_block}"
+    )
+
+    try:
+        client = _foundry_client()
+        model  = os.environ.get("ANTHROPIC_FOUNDRY_DEPLOYMENT", "claude-opus-4-8")
+        resp = client.messages.create(
+            model=model,
+            system="You write concise, high-signal LinkedIn posts. Follow the format exactly.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=min(8192, 1000 + n_posts * 900),
+        )
+        raw = resp.content[0].text.strip()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    posts = []
+    for block in (b.strip() for b in raw.split("===POST===") if b.strip()):
+        body, hashtags, src_part = block, [], ""
+        if "---HASHTAGS---" in body:
+            body, rest = body.split("---HASHTAGS---", 1)
+            tag_part, src_part = (rest.split("---SOURCES---", 1) + [""])[:2] \
+                if "---SOURCES---" in rest else (rest, "")
+            hashtags = [f"#{t.strip().lstrip('#')}" for t in tag_part.strip().splitlines() if t.strip()]
+        elif "---SOURCES---" in body:
+            body, src_part = body.split("---SOURCES---", 1)
+        # Tolerant index extraction: handles "1,4,7", "[1] [4]", "1 and 4", etc.
+        src_idx = [int(n) for n in re.findall(r"\d+", src_part)]
+        posts.append({"body": body.strip(), "hashtags": hashtags, "src_idx": src_idx})
+
+    if not posts:
+        return jsonify({"error": "The model returned no parseable posts. Try again."}), 500
+
+    # Verification/repair agent: guarantee every post has reference links.
+    _verify_feed_sources(posts, items, client, model)
+
+    out = []
+    for p in posts:
+        post_text = _append_sources(p["body"], p["src_idx"], items)
+        out.append({"post_text": post_text, "hashtags": p["hashtags"], "char_count": len(post_text)})
+    return jsonify({"posts": out, "count": len(out), "fetched": len(items)})
 
 
 @app.route("/mixer/videos")

@@ -53,10 +53,13 @@ _SYSTEM_PROMPT = (
     "Base it ONLY on the supplied material; if information is thin, say so briefly."
 )
 
+# char_limit generously sized so full articles reach the LLM (matches the
+# fetch cap in fetch_article_text); only output length differs by detail level.
+_CHAR_LIMIT = 50_000
 _DETAIL_SPECS = {
-    "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 320, 6000),
-    "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 550, 9000),
-    "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, tools/products named, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 1100, 16000),
+    "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 320, _CHAR_LIMIT),
+    "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 550, _CHAR_LIMIT),
+    "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, tools/products named, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 2000, _CHAR_LIMIT),
 }
 
 
@@ -126,7 +129,7 @@ def fetch_article_text(url: str) -> tuple[str, str]:
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
             tag.decompose()
         text = " ".join(soup.get_text(separator=" ").split())
-        return text[:20000], ""
+        return text[:_CHAR_LIMIT], ""
     except Exception as e:
         return "", str(e)
 
@@ -217,7 +220,7 @@ def summarize_article(article: dict, text: str, detail: str = "medium") -> dict:
             model=_MODEL,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
-            max_tokens=max_tokens + 200,
+            max_tokens=max_tokens + 400,
         )
         summary, questions = _split_questions(resp.content[0].text.strip())
     except Exception as e:

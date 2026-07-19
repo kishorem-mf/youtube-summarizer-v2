@@ -67,8 +67,70 @@
     .expand-row { display:none; }
     .expand-row.visible { display:table-row; }
     .expand-row td { background:#13161e; padding:16px 20px; border-bottom:1px solid var(--line); }
-    .summary-panel { font-size:14px; line-height:1.7; white-space:pre-wrap; color:var(--fg); max-width:900px; }
+    .summary-panel { font-size:14px; line-height:1.7; color:var(--fg); max-width:900px; }
     .summary-panel strong { color:#fff; }
+    .summary-panel h3, .summary-panel h4, .summary-panel h5, .summary-panel h6 { margin:14px 0 6px; color:#fff; font-weight:700; }
+    .summary-panel h3 { font-size:16px; } .summary-panel h4 { font-size:15px; } .summary-panel h5, .summary-panel h6 { font-size:14px; }
+    .summary-panel p { margin:7px 0; }
+    .summary-panel ul, .summary-panel ol { margin:7px 0; padding-left:22px; }
+    .summary-panel li { margin:4px 0; }
+    .summary-panel > :first-child { margin-top:0; }
+
+    /* Row selection + LinkedIn export */
+    input[type=checkbox].row-check { cursor:pointer; accent-color:var(--accent); width:15px; height:15px; }
+    tr.row-selected td { background:#1e1a24 !important; }
+    #export-toolbar { display:none; position:fixed; bottom:0; left:0; right:0;
+      background:#1a1d24; border-top:2px solid var(--accent); padding:12px 24px;
+      z-index:100; align-items:center; gap:16px; }
+    #export-toolbar.visible { display:flex; }
+    #export-count { color:var(--accent); font-weight:600; font-size:14px; white-space:nowrap; }
+    button.li-export { background:var(--accent); color:#fff; border:0; border-radius:8px;
+      padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
+    button.li-export:disabled { opacity:.5; cursor:default; }
+    button.li-clear { background:var(--line); color:var(--fg); border:0; border-radius:8px;
+      padding:9px 18px; font-weight:600; cursor:pointer; font-size:14px; }
+    #li-modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:200; }
+    #li-modal-backdrop.visible { display:flex; align-items:center; justify-content:center; }
+    #li-modal { background:var(--card); border:1px solid var(--line); border-radius:14px;
+      width:min(660px,95vw); padding:24px; display:flex; flex-direction:column; gap:14px; max-height:90vh; overflow-y:auto; }
+    #li-modal h3 { margin:0; font-size:15px; }
+    #li-post-textarea { width:100%; min-height:220px; background:#0f1115; border:1px solid var(--line);
+      color:var(--fg); border-radius:8px; padding:12px; font-size:14px; line-height:1.6; resize:vertical; font-family:inherit; }
+    #li-hashtags { color:var(--accent); font-size:13px; word-break:break-word; }
+    #li-charcount { font-size:12px; color:var(--mut); }
+    .li-modal-actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button.li-copy { background:var(--good); color:#000; border:0; border-radius:8px;
+      padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
+    button.li-regen { background:var(--line); color:var(--fg); border:0; border-radius:8px;
+      padding:9px 22px; font-weight:600; cursor:pointer; font-size:14px; }
+
+    /* Searchable multi-select widget */
+    .ms-wrap { position:relative; min-width:220px; }
+    .ms-box { background:#0f1115; border:1px solid var(--line); border-radius:8px;
+      padding:6px 10px; cursor:text; min-height:38px; display:flex; flex-wrap:wrap;
+      gap:4px; align-items:center; }
+    .ms-box:focus-within { border-color:var(--accent); }
+    .ms-chip { background:var(--line); color:var(--fg); border-radius:4px;
+      padding:2px 6px; font-size:12px; display:flex; align-items:center; gap:4px;
+      white-space:nowrap; }
+    .ms-chip-x { cursor:pointer; color:var(--mut); font-size:14px; line-height:1; }
+    .ms-chip-x:hover { color:var(--accent); }
+    .ms-input { background:transparent; border:none; outline:none; color:var(--fg);
+      font-size:14px; min-width:80px; flex:1; padding:2px 0; }
+    .ms-input::placeholder { color:var(--mut); }
+    .ms-dropdown { display:none; position:absolute; top:calc(100% + 4px); left:0; right:0;
+      background:var(--card); border:1px solid var(--line); border-radius:8px;
+      max-height:220px; overflow-y:auto; z-index:50; box-shadow:0 4px 16px rgba(0,0,0,.4); }
+    .ms-dropdown.open { display:block; }
+    .ms-opt { padding:8px 12px; font-size:13px; cursor:pointer; display:flex;
+      align-items:center; gap:8px; color:var(--fg); }
+    .ms-opt:hover { background:#1e222c; }
+    .ms-opt.selected { color:var(--accent); }
+    .ms-opt input[type=checkbox] { accent-color:var(--accent); cursor:pointer; }
+    .ms-empty { padding:10px 12px; font-size:13px; color:var(--mut); }
+    .ms-select-all { border-bottom:none; color:var(--accent); }
+    .ms-select-all:hover { background:#1a2030; }
+    .ms-divider { height:1px; background:var(--line); margin:2px 0; }
   </style>
 </head>
 <body>
@@ -114,15 +176,25 @@
         </div>
         <div class="field" id="f_search_term">
           <label>Topic (search_term)</label>
-          <select name="search_term" id="search_term_select" style="min-width:240px;">
-            <option value="">Loading…</option>
-          </select>
+          <div class="ms-wrap" id="ms_search_term" style="min-width:240px;">
+            <div class="ms-box" onclick="msOpen('ms_search_term')">
+              <span id="ms_search_term_chips"></span>
+              <input class="ms-input" id="ms_search_term_input" placeholder="Search topics…"
+                     oninput="msFilter('ms_search_term')" autocomplete="off">
+            </div>
+            <div class="ms-dropdown" id="ms_search_term_drop"></div>
+          </div>
         </div>
         <div class="field" id="f_tag">
           <label>Tag <span style="color:var(--mut);text-transform:none;letter-spacing:0;">(subtopic)</span></label>
-          <select name="tag" id="tag_select" style="min-width:180px;">
-            <option value="">Loading…</option>
-          </select>
+          <div class="ms-wrap" id="ms_tag" style="min-width:180px;">
+            <div class="ms-box" onclick="msOpen('ms_tag')">
+              <span id="ms_tag_chips"></span>
+              <input class="ms-input" id="ms_tag_input" placeholder="Search tags…"
+                     oninput="msFilter('ms_tag')" autocomplete="off">
+            </div>
+            <div class="ms-dropdown" id="ms_tag_drop"></div>
+          </div>
         </div>
         <div class="field" id="f_platform">
           <label>Platform</label>
@@ -158,6 +230,7 @@
     <table>
       <thead>
         <tr>
+          <th style="width:36px;"><input type="checkbox" class="row-check" id="check-all" title="Select all"></th>
           <th>ID</th>
           <th>Platform</th>
           <th>Detail</th>
@@ -176,6 +249,10 @@
       <tbody>
         {% for r in rows %}
         <tr>
+          <td style="width:36px;">
+            <input type="checkbox" class="row-check row-item"
+              data-row='{{ {"video_id": r.video_id, "detail": r.detail, "title": r.title, "author": r.get("author") or r.channel, "tags": r.get("tags", []), "url": r.get("url", ""), "source_platform": r.get("source_platform", "")} | tojson | e }}'>
+          </td>
           <td>
             {% if r.get('url') %}
             <a href="{{ r.url }}" target="_blank" style="color:var(--accent);text-decoration:none;" title="{{ r.video_id }}">{{ r.video_id[:14] }}</a>
@@ -218,12 +295,15 @@
           <td>{{ r.usage_count }}</td>
           <td>{{ r.word_count }}</td>
           <td>
-            <span class="summary-toggle" onclick="toggleSummary(this)" data-id="exp-{{ loop.index }}">
+            <span class="summary-toggle" onclick="toggleSummary(this)"
+                  data-id="exp-{{ loop.index }}"
+                  data-video-id="{{ r.video_id | e }}"
+                  data-detail="{{ r.detail | e }}">
               <span class="arrow">▼</span>
-              <span class="preview">{{ r.summary[:80] | e }}{% if r.summary|length > 80 %}…{% endif %}</span>
+              <span class="preview" style="color:var(--mut);">Expand to read…</span>
             </span>
           </td>
-          <td>
+          <td id="qcell-{{ loop.index }}">
             {% set qs = r.get('questions', []) %}
             {% if qs %}
             <ol style="margin:0;padding-left:16px;font-size:12px;color:var(--mut);">
@@ -235,8 +315,10 @@
           </td>
         </tr>
         <tr class="expand-row" id="exp-{{ loop.index }}">
-          <td colspan="13">
-            <div class="summary-panel" id="panel-{{ loop.index }}">{{ r.summary | e }}</div>
+          <td colspan="14">
+            <div class="summary-panel" id="panel-{{ loop.index }}">
+              <span style="color:var(--mut);font-size:13px;">Click to load summary…</span>
+            </div>
           </td>
         </tr>
         {% endfor %}
@@ -248,6 +330,35 @@
   {% endif %}
   {% endif %}
 
+</div>
+
+<!-- LinkedIn export toolbar (shown when rows are selected) -->
+<div id="export-toolbar">
+  <span id="export-count">0 selected</span>
+  <select id="export-style">
+    <option value="insights">Insights</option>
+    <option value="tips">Tips</option>
+    <option value="thread">Thread</option>
+  </select>
+  <button class="li-export" id="export-btn" onclick="exportToLinkedIn()">Export to LinkedIn</button>
+  <button class="li-clear" onclick="clearSelection()">Clear</button>
+</div>
+
+<!-- LinkedIn post preview modal -->
+<div id="li-modal-backdrop">
+  <div id="li-modal">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <h3>LinkedIn Post Preview</h3>
+      <button onclick="closeLiModal()" style="background:transparent;border:0;color:var(--mut);font-size:24px;cursor:pointer;line-height:1;padding:0 4px;">×</button>
+    </div>
+    <textarea id="li-post-textarea" oninput="updateCharCount()"></textarea>
+    <div id="li-hashtags"></div>
+    <div id="li-charcount"></div>
+    <div class="li-modal-actions">
+      <button class="li-copy" onclick="copyPost()">Copy Post</button>
+      <button class="li-regen" onclick="exportToLinkedIn(true)">Regenerate</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -269,74 +380,253 @@
   }
   updateFields();
 
-  // Populate search_term and tag dropdowns from /dynamo/filters
-  let topicTagsMap = {};  // {search_term: [tags]}
-  let allTags      = [];
+  // ── Multi-select widget ──────────────────────────────────────────────────
+  const _msState = {};
 
-  function populateTagDropdown(tags, savedTag) {
-    const tagSel = document.getElementById('tag_select');
-    tagSel.innerHTML = '<option value="">— all tags —</option>';
-    tags.forEach(t => {
-      const o = document.createElement('option');
-      o.value = t; o.textContent = t;
-      if (t === savedTag) o.selected = true;
-      tagSel.appendChild(o);
-    });
+  function msInit(id, options, savedValues) {
+    _msState[id] = { all: options, options: [...options], selected: new Set(savedValues) };
+    msRender(id);
   }
 
+  function msRender(id) {
+    const s = _msState[id];
+    // chips
+    const chipsEl = document.getElementById(id + '_chips');
+    chipsEl.innerHTML = '';
+    s.selected.forEach(v => {
+      const chip = document.createElement('span');
+      chip.className = 'ms-chip';
+      chip.innerHTML = `<span>${v}</span><span class="ms-chip-x" data-id="${id}" data-v="${v}" onclick="event.stopPropagation();msRemove('${id}','${v}')">×</span>`;
+      chipsEl.appendChild(chip);
+    });
+    // hidden inputs for form submission
+    document.querySelectorAll(`input.ms-hidden[data-msid="${id}"]`).forEach(e => e.remove());
+    const form = document.querySelector('form[action="/dynamo"]');
+    const fieldName = id === 'ms_search_term' ? 'search_term' : 'tag';
+    s.selected.forEach(v => {
+      const inp = document.createElement('input');
+      inp.type = 'hidden'; inp.className = 'ms-hidden';
+      inp.dataset.msid = id; inp.name = fieldName; inp.value = v;
+      form.appendChild(inp);
+    });
+    // dropdown options
+    msFilter(id);
+    // update tag dropdown when topic changes
+    if (id === 'ms_search_term') msRefreshTagOptions();
+  }
+
+  function msSelectAll(id) {
+    const s = _msState[id];
+    if (!s) return;
+    const q = (document.getElementById(id + '_input').value || '').toLowerCase();
+    const filtered = s.all.filter(o => o.toLowerCase().includes(q));
+    const allSel = filtered.every(v => s.selected.has(v));
+    if (allSel) {
+      filtered.forEach(v => s.selected.delete(v));
+    } else {
+      filtered.forEach(v => s.selected.add(v));
+    }
+    msRender(id);
+  }
+
+  function msFilter(id) {
+    const s = _msState[id];
+    if (!s) return;
+    const q = (document.getElementById(id + '_input').value || '').toLowerCase();
+    const filtered = s.all.filter(o => o.toLowerCase().includes(q));
+    const drop = document.getElementById(id + '_drop');
+    if (!filtered.length) {
+      drop.innerHTML = '<div class="ms-empty">No matches</div>';
+      return;
+    }
+    const allSel = filtered.every(v => s.selected.has(v));
+    const label  = allSel ? 'Deselect All' : `Select All (${filtered.length})`;
+    const selAll = `<div class="ms-opt ms-select-all" onclick="msSelectAll('${id}')">
+      <input type="checkbox" ${allSel?'checked':''} onclick="event.stopPropagation();msSelectAll('${id}')">
+      <span style="font-weight:600;">${label}</span></div>
+      <div class="ms-divider"></div>`;
+    drop.innerHTML = selAll + filtered.map(v => {
+      const sel = s.selected.has(v);
+      return `<div class="ms-opt${sel?' selected':''}" onclick="msToggle('${id}','${v}')">
+        <input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();msToggle('${id}','${v}')">
+        <span>${v}</span></div>`;
+    }).join('');
+  }
+
+  function msToggle(id, v) {
+    const s = _msState[id];
+    if (s.selected.has(v)) s.selected.delete(v); else s.selected.add(v);
+    msRender(id);
+  }
+
+  function msRemove(id, v) {
+    _msState[id].selected.delete(v);
+    msRender(id);
+  }
+
+  function msOpen(id) {
+    document.getElementById(id + '_drop').classList.add('open');
+    document.getElementById(id + '_input').focus();
+  }
+
+  // Close dropdowns when clicking outside
+  document.addEventListener('click', function(e) {
+    ['ms_search_term', 'ms_tag'].forEach(id => {
+      const wrap = document.getElementById(id);
+      if (wrap && !wrap.contains(e.target))
+        document.getElementById(id + '_drop').classList.remove('open');
+    });
+  });
+
+  function msRefreshTagOptions() {
+    const s = _msState['ms_search_term'];
+    if (!s) return;
+    const selected = [...s.selected];
+    let tags;
+    if (selected.length === 0) {
+      tags = allTags;
+    } else {
+      const union = new Set();
+      selected.forEach(term => {
+        (topicTagsMap[term] || []).forEach(t => union.add(t));
+      });
+      tags = union.size > 0 ? [...union].sort() : allTags;
+    }
+    const tagState = _msState['ms_tag'];
+    if (tagState) { tagState.all = tags; msFilter('ms_tag'); }
+    else msInit('ms_tag', tags, []);
+  }
+
+  // ── Load filter data ─────────────────────────────────────────────────────
+  let topicTagsMap = {};
+  let allTags      = [];
+  const _savedTerms    = {{ (search_term or []) | tojson }};
+  const _savedTags     = {{ (tag or []) | tojson }};
+  const _savedPlatform = "{{ platform | e }}";
+
   (function loadFilters() {
-    const savedTerm     = "{{ search_term | e }}";
-    const savedTag      = "{{ tag | e }}";
-    const savedPlatform = "{{ platform | e }}";
     fetch('/dynamo/filters')
       .then(r => r.json())
       .then(data => {
         if (data.error) return;
         topicTagsMap = data.topic_tags || {};
         allTags      = data.tags || [];
+        msInit('ms_search_term', data.search_terms || [], _savedTerms);
+        msInit('ms_tag',         allTags,               _savedTags);
 
-        const termSel = document.getElementById('search_term_select');
-        termSel.innerHTML = '<option value="">— all topics —</option>';
-        data.search_terms.forEach(t => {
-          const o = document.createElement('option');
-          o.value = t; o.textContent = t;
-          if (t === savedTerm) o.selected = true;
-          termSel.appendChild(o);
-        });
-
-        // Populate tags — filtered if a topic is pre-selected
-        const initialTags = savedTerm && topicTagsMap[savedTerm]
-          ? topicTagsMap[savedTerm] : allTags;
-        populateTagDropdown(initialTags, savedTag);
-
-        // Populate platform dropdown
         const platformSel = document.getElementById('platform_select');
         platformSel.innerHTML = '<option value="">— all platforms —</option>';
         (data.source_platforms || []).forEach(p => {
           const o = document.createElement('option');
           o.value = p; o.textContent = p;
-          if (p === savedPlatform) o.selected = true;
+          if (p === _savedPlatform) o.selected = true;
           platformSel.appendChild(o);
         });
       })
       .catch(() => {
-        document.getElementById('search_term_select').innerHTML = '<option value="">Error loading topics</option>';
-        document.getElementById('tag_select').innerHTML = '<option value="">Error loading tags</option>';
+        ['ms_search_term_drop','ms_tag_drop'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.innerHTML = '<div class="ms-empty">Error loading</div>';
+        });
         document.getElementById('platform_select').innerHTML = '<option value="">Error loading platforms</option>';
       });
   })();
 
-  // Filter tags when topic changes
-  document.getElementById('search_term_select').addEventListener('change', function() {
-    const term = this.value;
-    const tags = term && topicTagsMap[term] ? topicTagsMap[term] : allTags;
-    populateTagDropdown(tags, '');
+  function mdlite(text) {
+    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    let html = '', list = null;
+    const closeList = () => { if (list) { html += '</' + list + '>'; list = null; } };
+    for (const raw of String(text || '').split('\n')) {
+      const line = raw.trim();
+      if (!line) { closeList(); continue; }
+      let m;
+      if (m = line.match(/^(#{1,6})\s+(.*)$/)) {
+        closeList(); const lvl = Math.min(m[1].length + 2, 6);
+        html += '<h' + lvl + '>' + inline(m[2]) + '</h' + lvl + '>';
+      } else if (m = line.match(/^[-*•]\s+(.*)$/)) {
+        if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
+        html += '<li>' + inline(m[1]) + '</li>';
+      } else if (m = line.match(/^\d+[.)]\s+(.*)$/)) {
+        if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; }
+        html += '<li>' + inline(m[1]) + '</li>';
+      } else {
+        closeList(); html += '<p>' + inline(line) + '</p>';
+      }
+    }
+    closeList();
+    return html;
+  }
+
+  // --- Row selection & LinkedIn export ---
+  let selectedRows = [];
+
+  function updateSelectionState() {
+    selectedRows = [];
+    document.querySelectorAll('.row-item:checked').forEach(cb => {
+      try { selectedRows.push(JSON.parse(cb.dataset.row)); } catch(e) {}
+    });
+    const toolbar = document.getElementById('export-toolbar');
+    document.getElementById('export-count').textContent = selectedRows.length + ' selected';
+    toolbar.classList.toggle('visible', selectedRows.length > 0);
+    document.querySelectorAll('.row-item').forEach(cb => {
+      cb.closest('tr').classList.toggle('row-selected', cb.checked);
+    });
+  }
+
+  document.addEventListener('change', function(e) {
+    if (e.target.id === 'check-all')
+      document.querySelectorAll('.row-item').forEach(cb => cb.checked = e.target.checked);
+    if (e.target.classList.contains('row-check')) updateSelectionState();
   });
 
-  function mdlite(text) {
-    return text
-      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  function clearSelection() {
+    document.querySelectorAll('.row-check').forEach(cb => cb.checked = false);
+    updateSelectionState();
+  }
+
+  function exportToLinkedIn(regen) {
+    if (!selectedRows.length) return;
+    const btn = document.getElementById('export-btn');
+    btn.disabled = true; btn.textContent = 'Generating…';
+    fetch('/dynamo/export-linkedin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ items: selectedRows, style: document.getElementById('export-style').value })
+    })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false; btn.textContent = 'Export to LinkedIn';
+      if (data.error) { alert('Error: ' + data.error); return; }
+      document.getElementById('li-post-textarea').value = data.post_text || '';
+      document.getElementById('li-hashtags').textContent = (data.hashtags || []).join('  ');
+      updateCharCount();
+      document.getElementById('li-modal-backdrop').classList.add('visible');
+    })
+    .catch(err => {
+      btn.disabled = false; btn.textContent = 'Export to LinkedIn';
+      alert('Request failed: ' + err);
+    });
+  }
+
+  function updateCharCount() {
+    const n  = document.getElementById('li-post-textarea').value.length;
+    const el = document.getElementById('li-charcount');
+    el.textContent = n + ' / 3000 chars';
+    el.style.color = n > 3000 ? 'var(--accent)' : 'var(--mut)';
+  }
+
+  function copyPost() {
+    navigator.clipboard.writeText(document.getElementById('li-post-textarea').value)
+      .then(() => {
+        const b = document.querySelector('.li-copy');
+        b.textContent = 'Copied!';
+        setTimeout(() => b.textContent = 'Copy Post', 2000);
+      });
+  }
+
+  function closeLiModal() {
+    document.getElementById('li-modal-backdrop').classList.remove('visible');
   }
 
   function toggleSummary(toggle) {
@@ -347,13 +637,27 @@
       expRow.classList.remove('visible');
       toggle.classList.remove('open');
     } else {
-      if (!panel.dataset.rendered) {
-        panel.innerHTML = mdlite(panel.textContent);
-        panel.dataset.rendered = '1';
-      }
       expRow.classList.add('visible');
       toggle.classList.add('open');
       expRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (!panel.dataset.loaded) {
+        panel.dataset.loaded = '1';
+        const vid = toggle.dataset.videoId;
+        const det = toggle.dataset.detail;
+        fetch(`/dynamo/item/${encodeURIComponent(vid)}/${encodeURIComponent(det)}`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.error) { panel.textContent = 'Error: ' + data.error; return; }
+            panel.innerHTML = mdlite(data.summary || '(no summary)');
+            const idx = toggle.dataset.id.replace('exp-', '');
+            const qCell = document.getElementById('qcell-' + idx);
+            if (qCell && data.questions && data.questions.length) {
+              qCell.innerHTML = '<ol style="margin:0;padding-left:16px;font-size:12px;color:var(--mut);">'
+                + data.questions.map(q => `<li style="margin-bottom:3px;">${q}</li>`).join('') + '</ol>';
+            }
+          })
+          .catch(() => { panel.textContent = 'Failed to load summary.'; });
+      }
     }
   }
 </script>

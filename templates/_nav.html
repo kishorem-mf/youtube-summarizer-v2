@@ -5,8 +5,24 @@
   </div>
   <nav class="app-tabs">
     <a href="/"         class="app-tab {% if active_tab == 'search'   %}active{% endif %}">Search</a>
+    <a href="/inbox"    class="app-tab {% if active_tab == 'inbox'    %}active{% endif %}">Inbox<span class="nav-badge" id="nav-inbox-badge" hidden></span></a>
+    <a href="/reading"  class="app-tab {% if active_tab == 'reading'  %}active{% endif %}">Reading<span class="nav-badge" id="nav-reading-badge" hidden></span></a>
     <a href="/terms"    class="app-tab {% if active_tab == 'terms'    %}active{% endif %}">Search Terms</a>
     <a href="/dynamo"   class="app-tab {% if active_tab == 'dynamo'   %}active{% endif %}">DB Explorer</a>
     <a href="/linkedin" class="app-tab {% if active_tab == 'linkedin' %}active{% endif %}">LinkedIn</a>
   </nav>
 </header>
+<style>
+  .nav-badge { display:inline-block; margin-left:6px; background:#ff4d4f; color:#fff;
+    border-radius:20px; padding:1px 7px; font-size:11px; font-weight:600; line-height:1.4; }
+</style>
+<script>
+  fetch('/inbox/counts').then(r => r.json()).then(c => {
+    const set = (id, n) => {
+      const el = document.getElementById(id);
+      if (el && n > 0) { el.textContent = n; el.hidden = false; }
+    };
+    set('nav-inbox-badge', c.inbox);
+    set('nav-reading-badge', c.reading);
+  }).catch(() => {});
+</script>

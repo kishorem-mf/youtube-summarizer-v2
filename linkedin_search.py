@@ -9,6 +9,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import hashlib
 import os
+import re
 
 import httpx as _httpx
 import requests as _req
@@ -60,7 +61,7 @@ _SYSTEM_PROMPT = (
 _DETAIL_SPECS = {
     "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 320),
     "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 550),
-    "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 1100),
+    "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 2000),
 }
 
 
@@ -92,6 +93,33 @@ def _is_hiring_post(text: str) -> bool:
     """Return True if the post looks like a job/hiring advertisement."""
     lower = text.lower()
     return any(kw in lower for kw in _HIRING_KEYWORDS)
+
+
+_EN_STOPWORDS = {
+    "the", "and", "to", "of", "a", "in", "is", "for", "on", "with", "this",
+    "that", "it", "as", "are", "we", "you", "your", "our", "how", "what", "why",
+}
+
+
+def _looks_english(text: str) -> bool:
+    """Best-effort English check, no external deps.
+
+    Rejects text dominated by non-Latin scripts (CJK, Arabic, Cyrillic,
+    Devanagari…) and longer Latin text that lacks common English stopwords
+    (filters Spanish/French/German/etc.). Short/empty text is kept to avoid
+    over-filtering.
+    """
+    if not text:
+        return True
+    letters = [c for c in text if c.isalpha()]
+    if letters:
+        non_latin = sum(1 for c in letters if ord(c) > 0x024F)
+        if non_latin / len(letters) > 0.20:
+            return False
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if len(words) >= 12:
+        return sum(1 for w in words if w in _EN_STOPWORDS) >= 2
+    return True
 
 
 def search_linkedin(query: str, max_results: int = 10, date_filter: str = "") -> list[dict]:
@@ -153,6 +181,10 @@ def search_linkedin(query: str, max_results: int = 10, date_filter: str = "") ->
         text = _extract(item, "text", "content", "postText", "body")
 
         if _is_hiring_post(text):
+            continue
+
+        # English-only: drop posts with clearly non-English text
+        if not _looks_english(text):
             continue
 
         posts.append({
@@ -261,7 +293,7 @@ def summarize_post(post: dict, detail: str = "medium") -> dict:
             model=_MODEL,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
-            max_tokens=max_tokens + 200,
+            max_tokens=max_tokens + 400,
         )
         summary, questions = _split_questions(resp.content[0].text.strip())
     except Exception as e:

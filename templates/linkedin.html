@@ -99,6 +99,37 @@
   <div class="flash err">{{ error }}</div>
   {% endif %}
 
+  <style>
+    .feed-num { background:#0f1115; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:8px 12px; font-size:14px; width:150px; }
+    .feed-post { border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-top:14px; background:#0f1115; }
+    .feed-post h3 { margin:0 0 8px; font-size:14px; color:var(--accent); }
+    .feed-post textarea { width:100%; min-height:220px; background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:12px; font-size:14px; line-height:1.6; resize:vertical; font-family:inherit; }
+    .fp-tags { color:var(--accent); font-size:12px; margin-top:8px; word-break:break-word; }
+    .fp-meta { display:flex; gap:12px; align-items:center; margin-top:8px; }
+    .fp-char { font-size:12px; color:var(--mut); }
+    .fp-copy { background:var(--good); color:#062; border:0; border-radius:8px; padding:7px 16px; font-weight:600; cursor:pointer; font-size:13px; }
+  </style>
+
+  <div class="card">
+    <h2>📣 Weekly LinkedIn Feed</h2>
+    <p class="sub" style="margin-top:0;">Pull the most recent summarized entries from the database (all sources, newest first) and let the LLM group them into ready-to-post LinkedIn updates. Copy each straight into LinkedIn.</p>
+    <div class="field-row">
+      <div class="field">
+        <label>Entries to pull from DB</label>
+        <input type="number" class="feed-num" id="feed-n-db" min="1" max="100" value="30">
+      </div>
+      <div class="field">
+        <label>LinkedIn posts to generate</label>
+        <input type="number" class="feed-num" id="feed-n-posts" min="1" max="15" value="6">
+      </div>
+      <div class="field" style="align-self:flex-end;">
+        <button type="button" class="btn-primary" id="feed-btn" onclick="generateFeed()">Generate feed</button>
+      </div>
+    </div>
+    <span id="feed-status" style="font-size:12px;color:var(--mut);margin-top:10px;display:none;"></span>
+    <div id="feed-results" style="margin-top:6px;"></div>
+  </div>
+
   <div class="card">
     <h2>Select Video</h2>
     <form method="POST" action="/linkedin" id="gen-form">
@@ -312,6 +343,90 @@
     const msg = document.getElementById('copied-msg');
     msg.style.display = 'inline';
     setTimeout(() => { msg.style.display = 'none'; }, 2000);
+  }
+
+  // ── Weekly LinkedIn feed ──────────────────────────────────────────────────
+  function generateFeed() {
+    const btn     = document.getElementById('feed-btn');
+    const status  = document.getElementById('feed-status');
+    const results = document.getElementById('feed-results');
+    const nDb    = parseInt(document.getElementById('feed-n-db').value, 10)    || 30;
+    const nPosts = parseInt(document.getElementById('feed-n-posts').value, 10) || 6;
+
+    btn.disabled = true; btn.textContent = 'Generating…';
+    document.getElementById('spinner').classList.add('active');
+    status.style.display = 'none';
+    results.innerHTML = '';
+
+    fetch('/linkedin/feed', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ n_db: nDb, n_posts: nPosts }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false; btn.textContent = 'Generate feed';
+      document.getElementById('spinner').classList.remove('active');
+      if (data.error) { status.textContent = 'Error: ' + data.error; status.style.display = 'block'; return; }
+      status.textContent = 'Generated ' + data.count + ' post(s) from ' + data.fetched + ' recent entries.';
+      status.style.display = 'block';
+      (data.posts || []).forEach((p, i) => {
+        const div = document.createElement('div');
+        div.className = 'feed-post';
+        const tags = (p.hashtags || []).join('  ');
+        div.innerHTML =
+          '<h3>Post ' + (i + 1) + '</h3>' +
+          '<textarea id="fp-ta-' + i + '" oninput="fpChar(' + i + ')"></textarea>' +
+          (tags ? '<div class="fp-tags">' + tags + '</div>' : '') +
+          '<div class="fp-meta">' +
+            '<button type="button" class="fp-copy" onclick="fpCopy(' + i + ',this)">Copy post</button>' +
+            '<span class="fp-char" id="fp-char-' + i + '"></span>' +
+          '</div>';
+        results.appendChild(div);
+        document.getElementById('fp-ta-' + i).value = p.post_text || '';
+        fpChar(i);
+      });
+      if ((data.posts || []).length > 1) {
+        const all = document.createElement('button');
+        all.type = 'button'; all.className = 'btn-secondary';
+        all.style.marginTop = '14px';
+        all.textContent = 'Copy all posts';
+        all.onclick = function () { fpCopyAll(data.posts.length, this); };
+        results.appendChild(all);
+      }
+    })
+    .catch(err => {
+      btn.disabled = false; btn.textContent = 'Generate feed';
+      document.getElementById('spinner').classList.remove('active');
+      status.textContent = 'Request failed: ' + err; status.style.display = 'block';
+    });
+  }
+
+  function fpChar(i) {
+    const ta = document.getElementById('fp-ta-' + i);
+    const el = document.getElementById('fp-char-' + i);
+    const n  = ta.value.length;
+    el.textContent = n + ' / 3000 chars';
+    el.style.color = n > 3000 ? 'var(--red)' : 'var(--mut)';
+  }
+
+  function fpCopy(i, btn) {
+    const ta = document.getElementById('fp-ta-' + i);
+    ta.select();
+    document.execCommand('copy');
+    const old = btn.textContent; btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }
+
+  function fpCopyAll(n, btn) {
+    const parts = [];
+    for (let i = 0; i < n; i++) {
+      const ta = document.getElementById('fp-ta-' + i);
+      if (ta) parts.push(ta.value);
+    }
+    navigator.clipboard.writeText(parts.join('\n\n──────────\n\n')).then(() => {
+      const old = btn.textContent; btn.textContent = 'Copied all!';
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    });
   }
 </script>
 </body>
