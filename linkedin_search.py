@@ -59,8 +59,8 @@ _SYSTEM_PROMPT = (
 )
 
 _DETAIL_SPECS = {
-    "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 320),
-    "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 550),
+    "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 640),
+    "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 1100),
     "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 2000),
 }
 
@@ -253,8 +253,68 @@ def _split_questions(raw):
     return summary_part.strip(), questions[:5]
 
 
+_URL_RE = re.compile(r"https?://[^\s)\]}>\"']+")
+
+
+def _extract_article_url(text: str) -> str:
+    """First external (non-linkedin.com) URL in the post text, or ''. lnkd.in
+    wrappers are kept — they redirect to the real article."""
+    for raw in _URL_RE.findall(text or ""):
+        u = raw.rstrip(".,;)]}\"'")
+        if "linkedin.com" in u.lower():   # skip profile/company/post self-links
+            continue
+        return u
+    return ""
+
+
+def _resolve_external_url(url: str) -> str:
+    """Resolve a LinkedIn lnkd.in short link to its true external destination.
+
+    lnkd.in does NOT 302 straight to the target — it serves an interstitial page
+    with the real URL embedded. We fetch it and pull out the first non-LinkedIn
+    URL. Returns '' if the link resolves back into LinkedIn (jobs/feed/etc.)."""
+    import html as _html
+    try:
+        r = _req.get(url, timeout=25, verify=False, allow_redirects=True,
+                     headers={"User-Agent": "Mozilla/5.0 (compatible; summarizer-bot/1.0)"})
+    except Exception:
+        return ""
+    final = (r.url or url).lower()
+    _skip = ("linkedin.com", "lnkd.in", "licdn.com")
+    _asset = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".ico", ".woff")
+    if "lnkd.in" in final:                       # interstitial — dig the real URL out of the HTML
+        for u in re.findall(r'https?://[^\s"\'<>]+', r.text):
+            u = _html.unescape(u.rstrip(".,;)]}\"'"))
+            lu = u.lower()
+            if not any(d in lu for d in _skip) and not lu.endswith(_asset):
+                return u
+        return ""
+    if "linkedin.com" in final:                  # resolved to a LinkedIn-native page, not an article
+        return ""
+    return r.url or url
+
+
+def _fetch_linked_article(text: str):
+    """Best-effort fetch of the first external article linked in the post.
+    Resolves lnkd.in shortlinks first, then reuses google_search.fetch_article_text.
+    Returns (article_text, resolved_url)."""
+    url = _extract_article_url(text)
+    if not url:
+        return "", ""
+    real = _resolve_external_url(url) if "lnkd.in" in url.lower() else url
+    if not real:
+        return "", ""
+    try:
+        import google_search as _gs
+        atext, _err = _gs.fetch_article_text(real)
+        return (atext or ""), real
+    except Exception:
+        return "", real
+
+
 def summarize_post(post: dict, detail: str = "medium") -> dict:
-    """Summarise LinkedIn post text with Claude."""
+    """Summarise a LinkedIn post with Claude. If the post links to an external
+    article, that article's text is fetched and summarized too."""
     instruction, max_tokens = _DETAIL_SPECS.get(detail, _DETAIL_SPECS["medium"])
     text = (post.get("text") or "").strip()
 
@@ -270,7 +330,11 @@ def summarize_post(post: dict, detail: str = "medium") -> dict:
             "error":      "Post text is too short to summarize.",
         }
 
-    word_count = len(text.split())
+    # Open any linked article and pull its content in as extra material
+    article_text, article_url = _fetch_linked_article(text)
+    has_article = len(article_text) > 200
+
+    word_count = len((text + " " + article_text).split())
     n = _n_questions(word_count)
     q_suffix = (
         f"\n\n---QUESTIONS---\n"
@@ -278,13 +342,20 @@ def summarize_post(post: dict, detail: str = "medium") -> dict:
         f"Write specific questions a researcher would search for. "
         f"Number them 1-{n}. Output only the questions, no preamble."
     )
+    if has_article:
+        instruction = (instruction + " The post links to an external article whose "
+                       "full text is included below — base the summary primarily on "
+                       "that article, using the post as framing/context.")
+    material = f"Post:\n{text[:12000]}"
+    if has_article:
+        material += f"\n\nLinked article ({article_url}):\n{article_text[:14000]}"
     user_msg = (
         f"Author: {post.get('author', 'Unknown')}\n"
         f"Headline: {post.get('headline', '')}\n"
         f"Posted: {post.get('date', 'unknown')}\n"
         f"Engagement: {post.get('likes', 0)} likes, {post.get('comments', 0)} comments\n\n"
         f"{instruction}\n\n"
-        f"Post:\n{text[:12000]}"
+        f"{material}"
         f"{q_suffix}"
     )
 

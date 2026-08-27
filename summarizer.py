@@ -568,12 +568,12 @@ DETAIL_SPECS = {
     "low": (
         "Output a one-sentence TL;DR, then 2-3 short bullet points of the most "
         "important takeaways.",
-        320, _CHAR_LIMIT,
+        640, _CHAR_LIMIT,
     ),
     "medium": (
         "Output a one-sentence TL;DR, then 4-6 bullet points capturing the key "
         "concrete takeaways with specifics.",
-        550, _CHAR_LIMIT,
+        1100, _CHAR_LIMIT,
     ),
     "high": (
         "Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering "

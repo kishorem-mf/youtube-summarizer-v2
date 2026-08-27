@@ -492,6 +492,15 @@ def reading_toggle_read():
     return jsonify({"ok": True})
 
 
+@app.route("/reading/remove", methods=["POST"])
+def reading_remove():
+    """Hard-delete a reading item (used when the content isn't worth keeping)."""
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    storage.delete_item(data.get("video_id", ""), data.get("detail", "medium"))
+    return jsonify({"ok": True})
+
+
 @app.route("/inbox/counts")
 def inbox_counts():
     from flask import jsonify
