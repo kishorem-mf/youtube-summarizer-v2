@@ -57,8 +57,8 @@ _SYSTEM_PROMPT = (
 # fetch cap in fetch_article_text); only output length differs by detail level.
 _CHAR_LIMIT = 50_000
 _DETAIL_SPECS = {
-    "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 320, _CHAR_LIMIT),
-    "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 550, _CHAR_LIMIT),
+    "low":    ("Output a one-sentence TL;DR, then 2-3 short bullet points of the most important takeaways.", 640, _CHAR_LIMIT),
+    "medium": ("Output a one-sentence TL;DR, then 4-6 bullet points capturing the key concrete takeaways with specifics.", 1100, _CHAR_LIMIT),
     "high":   ("Output a 1-2 sentence TL;DR, then 8-12 detailed bullet points covering all key concepts, examples, numbers, tools/products named, and actionable takeaways. Group bullets under short bold sub-headings when the content has distinct themes.", 2000, _CHAR_LIMIT),
 }
 

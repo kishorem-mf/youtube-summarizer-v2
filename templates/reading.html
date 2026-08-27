@@ -36,6 +36,8 @@
     button { border:0; border-radius:8px; padding:7px 14px; font-weight:600; cursor:pointer; font-size:13px; }
     .toggle-read { background:var(--good); color:#062; }
     .read-btn { background:var(--line); color:var(--fg); }
+    .remove-btn { background:var(--line); color:var(--warn); border:1px solid var(--warn); }
+    .remove-btn:hover { background:var(--warn); color:#000; }
     .summary-panel { display:none; padding:0 18px 18px; }
     .summary-panel.open { display:block; }
     .summary-body { font-size:14px; line-height:1.7; color:var(--fg); }
@@ -79,6 +81,7 @@
             </select>
           </label>
           <button class="toggle-read" onclick="markRead(this)">✓ Mark read</button>
+          <button class="remove-btn" onclick="removeItem(this)">🗑 Remove</button>
         </div>
       </div>
     </div>
@@ -149,6 +152,21 @@
       body: JSON.stringify({ video_id: item.dataset.videoId, detail: item.dataset.detail, read: true }),
     }).then(r => r.json()).then(() => {
       // Read items leave the queue (still kept in DynamoDB / DB Explorer)
+      item.style.transition = 'opacity .25s'; item.style.opacity = '0';
+      setTimeout(() => {
+        item.remove();
+        if (!document.querySelectorAll('.item').length) location.reload();
+      }, 260);
+    }).catch(err => { btn.disabled = false; alert('Request failed: ' + err); });
+  }
+  function removeItem(btn) {
+    const item = btn.closest('.item');
+    if (!confirm('Remove this item permanently? It will be deleted from the database.')) return;
+    btn.disabled = true;
+    fetch('/reading/remove', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ video_id: item.dataset.videoId, detail: item.dataset.detail }),
+    }).then(r => r.json()).then(() => {
       item.style.transition = 'opacity .25s'; item.style.opacity = '0';
       setTimeout(() => {
         item.remove();
