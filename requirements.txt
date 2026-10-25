@@ -1,7 +1,21 @@
+# Web framework
 flask>=3.0
-python-dotenv>=1.0
-openai>=1.55
-yt-dlp
-youtube-transcript-api>=0.6.3
 markupsafe>=2.0
+python-dotenv>=1.0
+
+# LLM (Anthropic via Azure AI Foundry endpoint) + HTTP client it uses
+anthropic>=0.72
+httpx>=0.28
+
+# AWS / DynamoDB storage
+boto3>=1.37
+
+# Search + article/transcript fetching
+requests>=2.32
+beautifulsoup4>=4.13
+duckduckgo-search>=7.2
+yt-dlp
+youtube-transcript-api>=1.2
+
+# PDF carousel generation
 reportlab==3.6.13
