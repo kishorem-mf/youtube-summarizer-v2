@@ -7,4 +7,3 @@ outputs/
 .DS_Store
 *.msi
 corporate-ca-bundle.pem
-search_terms.json

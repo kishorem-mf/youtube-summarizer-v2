@@ -1,0 +1,196 @@
+{
+  "groups": {
+    "Claude / Cowork": [
+      "Claude for Business",
+      "Claude for Small Business",
+      "Claude Co-work for Business",
+      "Claude Cowork for Small Business"
+    ],
+    "Data / Tech": [
+      "metadata driven framework",
+      "data ingestion",
+      "vector databases",
+      "semantic layer",
+      "ontology",
+      "scrape data",
+      "knowledge graph",
+      "apify scraper",
+      "case study",
+      "Data assessment",
+      "self healing data pipelines",
+      "Declerative programming in Data",
+      "AI for Data pipelines testing"
+    ],
+    "Interoperability": [
+      "data interoperability",
+      "polaris catalog",
+      "catalog"
+    ],
+    "Supply chain": [
+      "demand planning",
+      "supply planning",
+      "inventory planning",
+      "demand fulfillment",
+      "Demand order",
+      "OTIF",
+      "lead time",
+      "stockout",
+      "inventory turnover",
+      "fill rate",
+      "gating factors",
+      "supply chain"
+    ],
+    "Data platform": [
+      "snowflake data",
+      "aws data",
+      "azure data",
+      "gcp data",
+      "data product",
+      "dremio",
+      "Trino",
+      "SAP Datasphere",
+      "apache ossie",
+      "implementation",
+      "snowflake openflow",
+      "self healing data pipelines"
+    ],
+    "lakehouse": [
+      "s3 tables",
+      "iceberg tables",
+      "duckdb",
+      "ducklake",
+      "pyiceberg",
+      "data-pipelines",
+      "polars iceberg"
+    ],
+    "observability": [
+      "observability",
+      "open telemetry",
+      "governance",
+      "openlineage",
+      "openmetadata",
+      "self healing data pipelines"
+    ],
+    "Cloud": [
+      "aws lambda",
+      "azure functions",
+      "glue",
+      "data factory",
+      "glue catalog",
+      "big query",
+      "redshift",
+      "airflow",
+      "gcp dataplex",
+      "aws sagemaker"
+    ],
+    "Databricks": [
+      "Databricks one",
+      "metrics view",
+      "unity catalog",
+      "lakehouse",
+      "ontology",
+      "bdc",
+      "data ingestion",
+      "omnigent",
+      "data governance",
+      "Databricks genie",
+      "Databricks apps",
+      "databricks lakebase",
+      "databrikcs lakefusion",
+      "build api on databricks data",
+      "Databricks Autoloader",
+      "spark declerative pipelines"
+    ],
+    "Books": [
+      "books money",
+      "books persuasion",
+      "books habit",
+      "books plan",
+      "books rich",
+      "happy"
+    ],
+    "sales": [
+      "cold calling",
+      "outbound calling",
+      "outbound email",
+      "cold emails",
+      "outbound email domain",
+      "OUTBOUND SALES",
+      "outbound sales pitch"
+    ],
+    "AI in Data Engineering": [
+      "Data ingestion",
+      "Data integration",
+      "Data quality",
+      "Observability",
+      "Transformations",
+      "ai in mdm master data",
+      "agentic data",
+      "schema inferene using ai",
+      "metadata enrichment using AI",
+      "mdm master data using ai",
+      "data pipeline generation using ai"
+    ],
+    "Data Governance": [
+      "Governance Framework",
+      "Stewardship",
+      "Master Data Management",
+      "catalog",
+      "ai in data governance",
+      "Data operations",
+      "data quality framework",
+      "data goveranance raci"
+    ],
+    "Microsoft fabric": [
+      "microsoft fabric mirroring",
+      "microsoft fabric shortcut",
+      "microsoft fabric onelake",
+      "microsoft fabric rayfin",
+      "microsoft fabric dbt",
+      "microsoft fabric lakehouse",
+      "microsoft fabric warehouse",
+      "microsoft fabric purview",
+      "microsoft fabric airflow",
+      "microsoft fabric pipelines",
+      "microsoft fabric  dataflows",
+      "onelake catalog",
+      "microsoft fabric ingestion",
+      "microsoft fabric semantic layer",
+      "microsoft fabric ai"
+    ],
+    "dbt": [
+      "dbt data",
+      "dbt data vault",
+      "dbt macros",
+      "dbt data modelling",
+      "dbt snapshot",
+      "dbt test",
+      "dbt materialization"
+    ],
+    "MDM": [
+      "master data assessment",
+      "MDM Master datA",
+      "MDM",
+      "master data management",
+      "mdm master data open source"
+    ]
+  },
+  "group_context": {
+    "Claude / Cowork": "",
+    "Data / Tech": "data engineering",
+    "Interoperability": "data catalog",
+    "Supply chain": "",
+    "Data platform": "",
+    "lakehouse": "",
+    "observability": "",
+    "Cloud": "",
+    "Databricks": "Databricks genie",
+    "Books": "",
+    "sales": "",
+    "AI in Data Engineering": "",
+    "Data Governance": "",
+    "Microsoft fabric": "",
+    "dbt": "",
+    "MDM": ""
+  }
+}
